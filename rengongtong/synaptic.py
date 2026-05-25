@@ -208,26 +208,8 @@ class SynapticManager:
             raise FileNotFoundError(f"No adapter found at {path}")
 
         if HAS_UNSLOTH:
-            model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=self.model_name,
-                max_seq_length=MAX_SEQ_LEN,
-                dtype=None,
-                load_in_4bit=True,
-                device_map="auto",
-            )
-            model = FastLanguageModel.get_peft_model(
-                model,
-                r=self.lora_r,
-                target_modules=LORA_TARGET_MODULES,
-                lora_alpha=self.lora_alpha,
-                lora_dropout=self.lora_dropout,
-                bias="none",
-                use_gradient_checkpointing="unsloth",
-                random_state=3407,
-            )
-            PeftModel.from_pretrained(model, str(path))
-            self.model = model
-            self.tokenizer = tokenizer
+            self.model = PeftModel.from_pretrained(self.model, str(path))
+            self.tokenizer = AutoTokenizer.from_pretrained(str(path))
         else:
             model = PeftModel.from_pretrained(self.model, str(path))
             self.model = model

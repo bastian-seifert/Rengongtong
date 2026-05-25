@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from unittest.mock import MagicMock, create_autospec
 
+import unsloth  # noqa: F401 — must be imported before transformers/peft
 import pytest
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerFast
