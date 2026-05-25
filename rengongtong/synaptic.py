@@ -14,13 +14,14 @@ from rengongtong._types import SoulPath, TensorDict
 
 log = logging.getLogger(__name__)
 
-try:
-    from unsloth import FastLanguageModel
 
-    HAS_UNSLOTH = True
-except ImportError:
-    FastLanguageModel = None  # type: ignore[assignment]
-    HAS_UNSLOTH = False
+def _unsloth_available() -> bool:
+    """Lazy check — avoids the Unsloth banner at import time."""
+    try:
+        import unsloth  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 BASE_MODEL = "HuggingFaceTB/SmolLM2-135M"
@@ -66,7 +67,7 @@ class SynapticManager:
     # ------------------------------------------------------------------
 
     def _load_model(self) -> None:
-        if HAS_UNSLOTH:
+        if _unsloth_available():
             self._load_unsloth()
         else:
             self._load_vanilla()
@@ -75,6 +76,8 @@ class SynapticManager:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
     def _load_unsloth(self) -> None:
+        from unsloth import FastLanguageModel
+
         log.info("Loading %s via Unsloth (4-bit)", self.model_name)
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=self.model_name,
@@ -195,10 +198,7 @@ class SynapticManager:
 
     def save_adapter(self, path: SoulPath) -> None:
         path.mkdir(parents=True, exist_ok=True)
-        if HAS_UNSLOTH:
-            self.model.save_pretrained(str(path))
-        else:
-            self.model.save_pretrained(str(path))
+        self.model.save_pretrained(str(path))
         self.tokenizer.save_pretrained(str(path))
         self._buffer.append(path)
         log.info("Soul saved to %s", path)

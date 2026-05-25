@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
+import warnings
 from pathlib import Path
 
 import typer
@@ -31,11 +34,37 @@ console = Console()
 
 PERSONA = PersonaWrapper()
 
+_VERBOSE = False
+
+
+@app.callback()
+def _main(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show verbose output (Unsloth banner, warnings, progress bars)"),
+) -> None:
+    global _VERBOSE
+    _VERBOSE = verbose
+
+
+@contextlib.contextmanager
+def _suppress_noise():
+    if _VERBOSE:
+        yield
+    else:
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+        with open(os.devnull, "w") as devnull:
+            with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                yield
+
 
 def _load_or_create_brain(soul_path: Path | None) -> Brain:
-    brain = Brain()
-    if soul_path and soul_path.exists():
-        brain.load_soul(soul_path)
+    with _suppress_noise():
+        brain = Brain()
+        if soul_path and soul_path.exists():
+            brain.load_soul(soul_path)
     return brain
 
 
