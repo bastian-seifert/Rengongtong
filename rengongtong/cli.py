@@ -66,8 +66,7 @@ def chat(
     """Chat with the entity."""
     brain = _load_or_create_brain(soul)
     response = brain.chat(message, max_new_tokens=max_tokens, temperature=temperature)
-    styled = PERSONA.speak(response, brain.state)
-    console.print(Panel(styled, title=f"[bold]{brain.mood}[/] Réngōng tóng"))
+    console.print(Panel(response, title=f"[bold]{brain.mood}[/] Réngōng tóng"))
 
 
 @app.command()
@@ -195,8 +194,7 @@ def run(
                     continue
 
                 response = brain.chat(msg)
-                styled = PERSONA.speak(response, brain.state)
-                console.print(Panel(styled, title=f"[bold]{brain.mood}[/] Réngōng tóng"))
+                console.print(Panel(response, title=f"[bold]{brain.mood}[/] Réngōng tóng"))
 
     asyncio.run(_loop())
 

@@ -207,13 +207,26 @@ class SynapticManager:
         if not path.exists():
             raise FileNotFoundError(f"No adapter found at {path}")
 
-        if HAS_UNSLOTH:
-            self.model = PeftModel.from_pretrained(self.model, str(path))
-            self.tokenizer = AutoTokenizer.from_pretrained(str(path))
-        else:
-            model = PeftModel.from_pretrained(self.model, str(path))
-            self.model = model
-            self.tokenizer = AutoTokenizer.from_pretrained(str(path))
+        from safetensors.torch import load_file
+
+        safetensors_path = list(path.glob("*.safetensors"))
+        if not safetensors_path:
+            raise FileNotFoundError(f"No safetensors file found in {path}")
+        state_dict = load_file(str(safetensors_path[0]))
+
+        # PEFT saves keys without the adapter-name suffix (e.g. ".default"),
+        # but the loaded model's state dict includes it.  Remap.
+        adapter_name = "default"
+        remapped = {}
+        for key, tensor in state_dict.items():
+            if "lora_" in key:
+                parts = key.rsplit(".", 1)
+                remapped[f"{parts[0]}.{adapter_name}.{parts[1]}"] = tensor
+            else:
+                remapped[key] = tensor
+
+        self.model.load_state_dict(remapped, strict=False)
+        self.tokenizer = AutoTokenizer.from_pretrained(str(path))
 
         log.info("Soul loaded from %s", path)
 
