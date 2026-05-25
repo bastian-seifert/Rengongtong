@@ -79,6 +79,6 @@ class EntityState(BaseModel):
     def to_soul_dir(self, base: Path = Path("souls")) -> Path:
         return base / f"{self.soul_id}--{self.created_at.strftime('%Y%m%dT%H%M%S')}"
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context: object) -> None:
         if self.current_soul_path is None:
             self.current_soul_path = str(self.to_soul_dir())

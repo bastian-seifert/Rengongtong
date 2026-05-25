@@ -12,6 +12,7 @@ from pathlib import Path
 
 import torch
 from torch.optim import AdamW
+from transformers import PreTrainedModel, PreTrainedTokenizerFast
 
 from rengongtong._jinja import render_template
 from rengongtong._state import EntityState, Mood, PerplexityReport, TrainingReport
@@ -63,11 +64,11 @@ class Brain:
     # ------------------------------------------------------------------
 
     @property
-    def model(self):
+    def model(self) -> PreTrainedModel:
         return self._synapse.model
 
     @property
-    def tokenizer(self):
+    def tokenizer(self) -> PreTrainedTokenizerFast:
         return self._synapse.tokenizer
 
     @property

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import warnings
+from collections.abc import Generator
 from pathlib import Path
 
 import typer
@@ -46,7 +47,7 @@ def _main(
 
 
 @contextlib.contextmanager
-def _suppress_noise():
+def _suppress_noise() -> Generator[None, None, None]:
     if _VERBOSE:
         yield
     else:

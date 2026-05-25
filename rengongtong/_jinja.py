@@ -4,9 +4,9 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-TEMPLATES_DIR = Path(__file__).parent / "templates"
+TEMPLATES_DIR: Path = Path(__file__).parent / "templates"
 
-env = Environment(
+env: Environment = Environment(
     loader=FileSystemLoader(str(TEMPLATES_DIR)),
     keep_trailing_newline=True,
 )

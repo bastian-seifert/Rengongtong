@@ -7,7 +7,7 @@ from rengongtong._state import EntityState, Mood
 
 log = logging.getLogger(__name__)
 
-FRANCONIAN_PREFIXES = {
+FRANCONIAN_PREFIXES: dict[Mood, list[str]] = {
     Mood.GRANTIG: ["Ja mecha!", "Herrgott nomal!", "Do schaug o!", "Bfei kert!",
                     "Wos is denn jetz scho wieder?"],
     Mood.SCHOLARLY: ["Erlabt mir a demütige Frog:", "Mit Erlaubnis,",
@@ -22,7 +22,7 @@ FRANCONIAN_PREFIXES = {
                    "No, des is a Sach:", "Do denk i:"],
 }
 
-SCHOLARLY_SUFFIXES = [
+SCHOLARLY_SUFFIXES: list[str] = [
     "— wenn mir die Ehr ghert.",
     "— wie ich bescheidenlich vermerk.",
     "— so stehts gschriebm in meim Büchle.",
