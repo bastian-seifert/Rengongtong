@@ -154,6 +154,11 @@ class ConsolidationRoutine:
             labels = input_ids.clone()
             labels[labels == self._tokenizer.pad_token_id] = -100
 
+            # Only train on the assistant's answer — mask template tokens
+            eos = (input_ids[0] == self._tokenizer.eos_token_id).nonzero(as_tuple=True)[0]
+            if len(eos) >= 3:
+                labels[0, : eos[1].item() + 1] = -100
+
             for _ in range(DREAM_STEPS_PER_PAIR):
                 optim.zero_grad()
                 outputs = self._model(
