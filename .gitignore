@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Réngōng tóng — generated soul snapshots
+/souls/*/
+/souls/*.json
+
+# Training outputs
+/outputs/
+/runs/
+
+# Model cache
+/models/
