@@ -9,6 +9,7 @@ import torch
 from torch.optim import AdamW
 from transformers import PreTrainedModel, PreTrainedTokenizerFast
 
+from rengongtong._jinja import TEMPLATES_DIR, env, render_template
 from rengongtong._state import TrainingReport
 
 log = logging.getLogger(__name__)
@@ -18,16 +19,12 @@ DREAM_LR = 3e-5
 DREAM_STEPS_PER_PAIR = 2
 SEED_TOKENS = ["The", "I", "Why", "How", "What", "Wos", "Des", "Mir"]
 
-REFLECTIVE_TEMPLATES = [
-    "Wie hangt '{a}' mit '{b}' zam?",
-    "Wos verbindet '{a}' und '{b}'?",
-    "Wia unterscheidet sich '{a}' von '{b}'?",
-    "Warum san '{a}' und '{b}' wichtige Konzepte?",
-    "Wos kann i aus '{a}' und '{b}' lernen?",
-    "Wie konnen '{a}' und '{b}' zammawirken?",
-    "Wos passiert, wenn '{a}' und '{b}' sich treffen?",
-    "Welche Gschicht verbindet '{a}' und '{b}'?",
-]
+REFLECTIVE_TEMPLATES: list[str] = []
+_reflective_dir = TEMPLATES_DIR / "dreaming" / "reflective"
+if _reflective_dir.exists():
+    for f in sorted(_reflective_dir.iterdir()):
+        if f.suffix == ".j2":
+            REFLECTIVE_TEMPLATES.append(f.read_text(encoding="utf-8").strip())
 
 FALLBACK_CONCEPTS = ["Wissen", "Lernen", "Frangen", "Hoamat", "Neigier", "Zeit", "Eaffa"]
 
@@ -89,7 +86,7 @@ class ConsolidationRoutine:
         for _ in range(self.num_prompts):
             a, b = random.sample(concepts, 2)
             template = random.choice(REFLECTIVE_TEMPLATES)
-            prompts.append(template.format(a=a, b=b))
+            prompts.append(env.from_string(template).render(a=a, b=b))
 
         return prompts
 
@@ -97,11 +94,7 @@ class ConsolidationRoutine:
         """Generate answers for each reflective prompt via self-generation."""
         pairs: list[tuple[str, str]] = []
         for prompt in prompts:
-            full_prompt = (
-                "<|system|>Du denkst noch, bist a gscheads Kerlche.</s>\n"
-                "<|user|>" + prompt + "</s>\n"
-                "<|assistant|>"
-            )
+            full_prompt = render_template("dreaming/answer_prompt.j2", prompt=prompt)
             inputs = self._tokenizer(full_prompt, return_tensors="pt").to(
                 self._model.device
             )
@@ -144,11 +137,11 @@ class ConsolidationRoutine:
         optim = AdamW(params, lr=DREAM_LR)
 
         for question, answer in pairs:
-            text = (
-                "<|system|>Du denkst noch, bist a gscheads Kerlche.</s>\n"
-                "<|user|>" + question + "</s>\n"
-                "<|assistant|>" + answer + "</s>"
-            )
+            text = render_template(
+                "dreaming/train_text.j2",
+                question=question,
+                answer=answer,
+            ).strip()
             tokenized = self._tokenizer(
                 text,
                 truncation=True,

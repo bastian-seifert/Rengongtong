@@ -13,6 +13,7 @@ from pathlib import Path
 import torch
 from torch.optim import AdamW
 
+from rengongtong._jinja import render_template
 from rengongtong._state import EntityState, Mood, PerplexityReport, TrainingReport
 from rengongtong._types import TensorDict
 from rengongtong.synaptic import SynapticManager
@@ -158,16 +159,12 @@ class Brain:
 
     def _build_prompt(self, message: str, system_prompt: str | None = None) -> str:
         if system_prompt is None:
-            system_prompt = (
-                "Du bisch a fränkischa kloaner Bua mit am große Wissensdurst. "
-                "Reds Frängisch und benimmst di wie a ganz a Gscheada. "
-                "Wannst wos ned woaßt, dann frogst höflich auf Chinesisch."
-            )
+            system_prompt = render_template("brain/system_prompt.j2").strip()
 
-        return (
-            f"<|system|>\n{system_prompt}</s>\n"
-            f"<|user|>\n{message}</s>\n"
-            f"<|assistant|>\n"
+        return render_template(
+            "brain/chat.j2",
+            system_prompt=system_prompt,
+            message=message,
         )
 
     # ------------------------------------------------------------------

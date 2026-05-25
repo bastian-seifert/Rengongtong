@@ -12,6 +12,7 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.0",
     "pydantic>=2.0",
+    "jinja2>=3.1",
     "peft>=0.14",
     "bitsandbytes>=0.45",
     "transformers>=4.47",
@@ -28,6 +29,9 @@ rengongtong = "rengongtong.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["rengongtong*"]
+
+[tool.setuptools.package-data]
+rengongtong = ["templates/**/*.j2"]
 
 [build-system]
 requires = ["setuptools>=75.0"]

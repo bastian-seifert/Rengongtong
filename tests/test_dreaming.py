@@ -9,6 +9,7 @@ from rengongtong.dreaming import (
     REFLECTIVE_TEMPLATES,
     SEED_TOKENS,
 )
+from rengongtong._jinja import env
 
 
 class TestConsolidationRoutinePrompts:
@@ -56,7 +57,7 @@ class TestConsolidationRoutinePrompts:
             prompts = self.routine.generate_reflective_prompts(concepts)
             for p in prompts:
                 for t in REFLECTIVE_TEMPLATES:
-                    formatted = t.format(a="X", b="Y")
+                    formatted = env.from_string(t).render(a="X", b="Y")
                     if formatted == p:
                         seen_templates.add(t)
         # At least 2 different templates should have been used
@@ -88,8 +89,8 @@ class TestConsolidationRoutineConstants:
     def test_reflective_templates_non_empty(self):
         assert len(REFLECTIVE_TEMPLATES) > 0
         for t in REFLECTIVE_TEMPLATES:
-            assert "{a}" in t
-            assert "{b}" in t
+            assert "{{ a }}" in t
+            assert "{{ b }}" in t
 
     def test_fallback_concepts_non_empty(self):
         assert len(FALLBACK_CONCEPTS) > 0

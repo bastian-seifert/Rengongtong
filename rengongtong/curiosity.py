@@ -6,6 +6,7 @@ import math
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerFast
 
+from rengongtong._jinja import render_template
 from rengongtong._state import PerplexityReport
 
 log = logging.getLogger(__name__)
@@ -80,12 +81,7 @@ class CuriosityController:
     def generate_curious_question(self) -> str:
         """Generate a proactive question the model wants answered."""
         self.proactive_question_count += 1
-        prompt = (
-            "<|system|>Du bist neugierig und willst was Neues learnen. "
-            "Stell am beste eine Frage, auf die du no koane Antwort weißt.</s>\n"
-            "<|user|>Was willst du wissen?</s>\n"
-            "<|assistant|>"
-        )
+        prompt = render_template("curiosity/question.j2")
         inputs = self._tokenizer(prompt, return_tensors="pt").to(self._model.device)
 
         with torch.inference_mode():
