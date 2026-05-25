@@ -26,7 +26,7 @@ if _reflective_dir.exists():
         if f.suffix == ".j2":
             REFLECTIVE_TEMPLATES.append(f.read_text(encoding="utf-8").strip())
 
-FALLBACK_CONCEPTS = ["Wissen", "Lernen", "Frangen", "Hoamat", "Neigier", "Zeit", "Eaffa"]
+FALLBACK_CONCEPTS = ["Knowledge", "Learning", "Questions", "Home", "Curiosity", "Time", "Experience"]
 
 
 class ConsolidationRoutine:

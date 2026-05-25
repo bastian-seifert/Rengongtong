@@ -135,13 +135,12 @@ class TestBrainBuildPrompt:
         prompt = brain._build_prompt("Test", system_prompt="Custom sys")
         assert "Custom sys" in prompt
 
-    def test_default_system_prompt_franconian(self):
+    def test_default_system_prompt_english(self):
         brain = Brain.__new__(Brain)
         brain._build_prompt = Brain._build_prompt.__get__(brain, Brain)
 
         prompt = brain._build_prompt("Test")
-        assert "fränkischa" in prompt
-        assert "Frängisch" in prompt
+        assert "thirst for knowledge" in prompt
 
 
 class TestBrainApplyDecay:
