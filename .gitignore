@@ -227,3 +227,6 @@ __marimo__/
 
 # Model cache
 /models/
+
+# Virtual environment
+/.venv/

@@ -49,10 +49,13 @@ rengongtong/
 
 ```bash
 # Requires Python 3.12+ and CUDA GPU
-pip install -e .
 
-# Or with uv:
-uv pip install -e . --torch-backend=auto
+# Recommended — uv (fast, reliable):
+uv sync
+uv run rengongtong status
+
+# Or with pip:
+pip install -e .
 ```
 
 ## Usage

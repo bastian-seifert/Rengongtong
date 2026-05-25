@@ -1,6 +1,6 @@
 [project]
 name = "rengongtong"
-dynamic = ["version"]
+version = "0.1.0"
 description = "Réngōng tóng (人工童) — A local, persistent Agentic Tamagotchi on SmolLM2-135M"
 readme = "README.md"
 license = "MIT"
@@ -22,13 +22,21 @@ dependencies = [
 
 [project.urls]
 repository = "https://github.com/bastian/rengongtong"
-documentation = "https://github.com/bastian/rengongtong"
 
-[tool.setuptools.dynamic]
-version = { attr = "rengongtong.__version__" }
+[project.scripts]
+rengongtong = "rengongtong.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["rengongtong*"]
 
-[project.scripts]
-rengongtong = "rengongtong.cli:app"
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+package = true
+dev-dependencies = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
