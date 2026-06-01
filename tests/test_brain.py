@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from rengongtong._state import EntityState, Mood
-from rengongtong._types import MptConfig
+from rengongtong._types import MptConfig, ReplayConfig
 from rengongtong.brain import Brain
 
 
@@ -24,6 +24,16 @@ def _make_brain() -> Brain:
             self.tokenizer = MagicMock()
             self.model.device = torch.device("cpu")
             self.tokenizer.pad_token_id = 0
+            # Give at least one trainable param so AdamW doesn't complain
+            w = torch.nn.Parameter(torch.zeros(1), requires_grad=True)
+            self.model.parameters = MagicMock(return_value=[w])
+            # Make model(...) return a real loss tensor so loss.item() works
+            def fake_forward(**kw):
+                out = MagicMock()
+                out.loss = torch.tensor(0.5, requires_grad=True)
+                out.logits = torch.randn(1, 5, 100)
+                return out
+            self.model.side_effect = fake_forward
 
         def save_adapter(self, path):
             path.mkdir(parents=True, exist_ok=True)
@@ -219,3 +229,50 @@ class TestBrainStatePersistence:
         brain = Brain.__new__(Brain)
         brain.state = EntityState(mood=Mood.CURIOUS)
         assert brain.mood == Mood.CURIOUS
+
+
+class TestBrainReplay:
+    def test_feed_with_replay_increments_count(self):
+        import torch
+
+        brain = _make_brain()
+        brain.state = EntityState()
+        brain._replay_buffer = None  # fresh
+        replay = ReplayConfig(capacity=10, mode="nll", strategy="fifo", replay_ratio=0.3)
+        from rengongtong.memory import ExperienceReplayBuffer
+        brain._replay_buffer = ExperienceReplayBuffer(
+            capacity=replay.capacity,
+            strategy=replay.strategy,
+            mode=replay.mode,
+            replay_ratio=replay.replay_ratio,
+        )
+        # Push some prior experiences so replay has something to sample
+        for i in range(5):
+            brain._replay_buffer.push(f"prior_{i}", loss=0.5)
+
+        report = brain.feed("test text")
+        assert isinstance(report.loss, float)
+        assert brain.state.replay_count == 1
+
+    def test_replay_buffer_saved_in_soul_snapshot(self, tmp_path):
+        brain = _make_brain()
+        replay = ReplayConfig(capacity=10)
+        from rengongtong.memory import ExperienceReplayBuffer
+        brain._replay_buffer = ExperienceReplayBuffer(
+            capacity=replay.capacity,
+            strategy=replay.strategy,
+            mode=replay.mode,
+            replay_ratio=replay.replay_ratio,
+        )
+        brain._replay_buffer.push("hello", loss=0.5)
+        brain.state = EntityState()
+
+        path = tmp_path / "replay_soul"
+        brain.save_soul(path)
+
+        state_file = path / "state.json"
+        assert state_file.exists()
+        import json
+        data = json.loads(state_file.read_text())
+        assert "replay_buffer" in data
+        assert data["replay_buffer"]["experiences"][0]["text"] == "hello"

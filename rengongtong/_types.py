@@ -40,6 +40,21 @@ class MptConfig:
 
 
 # ---------------------------------------------------------------------------
+# Replay Configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReplayConfig:
+    """Configuration for experience replay buffer."""
+
+    mode: str = "nll"
+    strategy: str = "fifo"
+    capacity: int = 200
+    replay_ratio: float = 0.3
+
+
+# ---------------------------------------------------------------------------
 # Protocols
 # ---------------------------------------------------------------------------
 

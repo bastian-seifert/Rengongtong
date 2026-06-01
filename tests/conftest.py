@@ -107,6 +107,12 @@ def mock_tokenizer() -> MagicMock:
             def to(self, device):
                 return self
 
+            def items(self):
+                return [("input_ids", self.input_ids), ("attention_mask", self.attention_mask)]
+
+            def __getitem__(self, key):
+                return getattr(self, key)
+
         return FakeEncoding()
 
     tok.side_effect = fake_call

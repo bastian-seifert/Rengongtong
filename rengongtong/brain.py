@@ -16,7 +16,8 @@ from transformers import PreTrainedModel, PreTrainedTokenizerFast
 
 from rengongtong._jinja import render_template
 from rengongtong._state import EntityState, Mood, PerplexityReport, TrainingReport
-from rengongtong._types import MptConfig, TensorDict
+from rengongtong._types import MptConfig, ReplayConfig, TensorDict
+from rengongtong.memory import ExperienceReplayBuffer
 from rengongtong.metabolism import MetabolicLoop
 from rengongtong.synaptic import SynapticManager
 
@@ -46,11 +47,12 @@ class Brain:
 
     def __init__(
         self,
-        model_name: str = "HuggingFaceTB/SmolLM2-135M",
+        model_name: str = "HuggingFaceTB/SmolLM2-1.7B",
         soul_path: Path | str | None = None,
         lora_r: int = 16,
         lora_alpha: int = 32,
         mpt: MptConfig | None = None,
+        replay: ReplayConfig | None = None,
     ) -> None:
         self._synapse = SynapticManager(
             model_name=model_name,
@@ -63,6 +65,14 @@ class Brain:
             mode=self.mpt.decay_mode,
             gershgorin_penalty=self.mpt.gershgorin_penalty,
         )
+        self._replay_buffer: ExperienceReplayBuffer | None = None
+        if replay is not None:
+            self._replay_buffer = ExperienceReplayBuffer(
+                capacity=replay.capacity,
+                strategy=replay.strategy,
+                mode=replay.mode,
+                replay_ratio=replay.replay_ratio,
+            )
         self._running = False
         self._tasks: list[asyncio.Task] = []
 
@@ -115,6 +125,22 @@ class Brain:
 
         avg_loss = total_loss / steps
         perplexity = math.exp(avg_loss) if avg_loss < 50 else float("inf")
+
+        if self._replay_buffer is not None:
+            self._replay_buffer.push(
+                text if isinstance(text, str) else " ".join(texts),
+                loss=avg_loss,
+            )
+            replay_loss, n = self._replay_buffer.replay_loss(
+                self.model, self.tokenizer, self.model.device,
+            )
+            if n > 0:
+                optim.zero_grad()
+                replay_loss.backward()
+                torch.nn.utils.clip_grad_norm_(params, 1.0)
+                optim.step()
+                self.state.replay_count += 1
+                avg_loss = 0.7 * avg_loss + 0.3 * replay_loss.item()
 
         self.model.eval()
         elapsed = time.perf_counter() - t0
@@ -238,8 +264,12 @@ class Brain:
             path = self.state.to_soul_dir()
 
         self._synapse.save_adapter(path)
+        snapshot = self.state.model_dump()
+        replay_buf = getattr(self, "_replay_buffer", None)
+        if replay_buf is not None:
+            snapshot["replay_buffer"] = replay_buf.state_dict()
         with open(path / "state.json", "w") as f:
-            json.dump(self.state.model_dump(), f, indent=2, default=str)
+            json.dump(snapshot, f, indent=2, default=str)
 
         self.state.current_soul_path = str(path)
         log.info("Soul snapshot saved to %s", path)
@@ -252,7 +282,11 @@ class Brain:
         state_file = path / "state.json"
         if state_file.exists():
             data = json.loads(state_file.read_text())
+            replay_data = data.pop("replay_buffer", None)
             self.state = EntityState(**data)
+            replay_buf = getattr(self, "_replay_buffer", None)
+            if replay_data is not None and replay_buf is not None:
+                replay_buf.load_state_dict(replay_data)
 
         self.state.current_soul_path = str(path)
         log.info("Soul restored from %s", path)

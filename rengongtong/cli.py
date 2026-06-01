@@ -17,6 +17,7 @@ from rich.table import Table
 
 from rengongtong.brain import Brain
 from rengongtong.persona import PersonaWrapper
+from rengongtong._types import ReplayConfig
 
 logging.basicConfig(
     level=logging.INFO,
@@ -61,9 +62,12 @@ def _suppress_noise() -> Generator[None, None, None]:
                 yield
 
 
-def _load_or_create_brain(soul_path: Path | None) -> Brain:
+def _load_or_create_brain(
+    soul_path: Path | None,
+    replay: ReplayConfig | None = None,
+) -> Brain:
     with _suppress_noise():
-        brain = Brain()
+        brain = Brain(replay=replay)
         if soul_path and soul_path.exists():
             brain.load_soul(soul_path)
     return brain
@@ -74,9 +78,21 @@ def feed(
     text: str = typer.Argument(..., help="Text to train on"),
     steps: int = typer.Option(3, "--steps", "-s", help="Number of training steps"),
     soul: Path = typer.Option(None, "--soul", "-S", help="Path to a soul snapshot to load first"),
+    replay_capacity: int = typer.Option(0, "--replay-capacity", "-R", help="Experience replay buffer capacity (0 = disabled)"),
+    replay_mode: str = typer.Option("nll", "--replay-mode", help="Replay loss mode: nll|distill"),
+    replay_strategy: str = typer.Option("fifo", "--replay-strategy", help="Replay sampling: fifo|importance"),
+    replay_ratio: float = typer.Option(0.3, "--replay-ratio", help="Fraction of buffer to replay per feed"),
 ) -> None:
     """Feed the entity — incremental LoRA fine-tuning on provided text."""
-    brain = _load_or_create_brain(soul)
+    replay_cfg = None
+    if replay_capacity > 0:
+        replay_cfg = ReplayConfig(
+            mode=replay_mode,
+            strategy=replay_strategy,
+            capacity=replay_capacity,
+            replay_ratio=replay_ratio,
+        )
+    brain = _load_or_create_brain(soul, replay=replay_cfg)
     report = brain.feed(text, steps=steps)
     console.print(Panel(f"[bold]Feed complete[/]\n"
                         f"Loss: {report.loss:.4f}\n"
@@ -117,6 +133,7 @@ def status(
     table.add_row("Total dreams", str(s.total_dreams))
     table.add_row("Total decays", str(s.total_decays))
     table.add_row("Total tokens seen", f"{s.total_tokens_seen:,}")
+    table.add_row("Replay count", str(s.replay_count))
     table.add_row("High attention", str(s.high_attention_mode))
     table.add_row("Curiosity level", f"{s.curiosity_level:.3f}")
     table.add_row("Last feed", str(s.last_feed or "never"))
@@ -195,9 +212,21 @@ def list_souls(
 @app.command()
 def run(
     soul: Path = typer.Option(None, "--soul", "-S", help="Initial soul snapshot"),
+    replay_capacity: int = typer.Option(0, "--replay-capacity", "-R", help="Experience replay buffer capacity (0 = disabled)"),
+    replay_mode: str = typer.Option("nll", "--replay-mode", help="Replay loss mode: nll|distill"),
+    replay_strategy: str = typer.Option("fifo", "--replay-strategy", help="Replay sampling: fifo|importance"),
+    replay_ratio: float = typer.Option(0.3, "--replay-ratio", help="Fraction of buffer to replay per feed"),
 ) -> None:
     """Run the full interactive entity loop (lifecycle + chat)."""
-    brain = _load_or_create_brain(soul)
+    replay_cfg = None
+    if replay_capacity > 0:
+        replay_cfg = ReplayConfig(
+            mode=replay_mode,
+            strategy=replay_strategy,
+            capacity=replay_capacity,
+            replay_ratio=replay_ratio,
+        )
+    brain = _load_or_create_brain(soul, replay=replay_cfg)
     console.print("[bold cyan]Réngōng tóng[/] is awake. Type your messages or commands.")
 
     async def _loop() -> None:

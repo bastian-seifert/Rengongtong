@@ -24,8 +24,8 @@ def _unsloth_available() -> bool:
         return False
 
 
-BASE_MODEL = "HuggingFaceTB/SmolLM2-135M"
-MAX_SEQ_LEN = 2048
+BASE_MODEL = "HuggingFaceTB/SmolLM2-1.7B"
+MAX_SEQ_LEN = 8192
 
 LORA_TARGET_MODULES = [
     "q_proj", "k_proj", "v_proj", "o_proj",

@@ -1,8 +1,9 @@
 # Réngōng tóng (人工童)
 
-A local, persistent "Agentic Tamagotchi" built on **SmolLM2-135M** that evolves via
-incremental LoRA updates, curiosity-driven exploration, biological weight decay, and
-**Matrix Perturbation Theory (MPT)** constructs for spectral stability.
+A local, persistent "Agentic Tamagotchi" built on **SmolLM2-1.7B** that evolves via
+incremental LoRA updates, curiosity-driven exploration, biological weight decay,
+experience replay, and **Matrix Perturbation Theory (MPT)** constructs for spectral
+stability.
 
 > *"A fränkischa kloaner Bua mit am großen Wissensdurst."*
 
@@ -30,9 +31,10 @@ rengongtong/
     ├── __init__.py
     ├── __main__.py                 # python -m rengongtong
     ├── _state.py                   # Pydantic models (EntityState, Mood, reports)
-    ├── _types.py                   # MptConfig, DecayMode, Protocols
+    ├── _types.py                   # MptConfig, ReplayConfig, DecayMode, Protocols
     ├── _spectral.py                # Pure MPT tensor math (Gershgorin, Davis-Kahan, Pseudospectral)
     ├── _jinja.py                   # Jinja2 template rendering engine
+    ├── memory.py                   # ExperienceReplayBuffer — NLL & distillation replay
     ├── brain.py                    # Brain — central orchestrator
     ├── synaptic.py                 # SynapticManager — 4-bit quant + LoRA soul
     ├── metabolism.py               # MetabolicLoop — saliency & Gershgorin decay
@@ -52,13 +54,15 @@ rengongtong/
 | **ConsolidationRoutine** | `dreaming.py` | Self-distillation with Davis-Kahan subspace alignment |
 | **CuriosityController** | `curiosity.py` | Perplexity measurement + pseudospectral stability checking |
 | **PersonaWrapper** | `persona.py` | East Franconian dialect + Chinese scholarly humility injection |
+| **ExperienceReplayBuffer** | `memory.py` | Short-term episodic memory with NLL & distillation replay |
 | **Spectral Math** | `_spectral.py` | Pure tensor functions for all MPT constructs |
 
 ### Design
 
-- **Base model**: `HuggingFaceTB/SmolLM2-135M` (frozen, 4-bit quantized via Unsloth)
+- **Base model**: `HuggingFaceTB/SmolLM2-1.7B` (frozen, 4-bit quantized via Unsloth)
 - **Soul**: LoRA adapter (`r=16`, `α=32`) on all linear layers
 - **Memory**: Revolving buffer of daily soul snapshots in `souls/`
+- **Experience Replay**: Short-term episodic buffer (FIFO/importance sampling, NLL/distillation modes)
 - **Persona**: 6 mood states (grantig, scholarly, curious, bored, hungry, neutral) with Franconian vocabulary injection
 
 ---
@@ -100,6 +104,31 @@ Loss_total = Loss_NLL + λ · ‖sin Θ(V_base, V_soul)‖_F
 
 ---
 
+## Experience Replay Buffer (`memory.py`)
+
+A short-term episodic memory that replays recent inputs during the feed cycle
+to complement MPT spectral constraints:
+
+- **NLL Replay** (default): replayed texts are concatenated with new data and
+  trained with standard cross-entropy loss
+- **Distillation Replay**: the model's own logits are cached at push time; on
+  replay the loss is `KL(cached_logits ‖ current_logits)`, preserving "dark
+  knowledge"
+
+### Integration
+
+```
+User feeds "text A"
+  → push("text A") stores it in the buffer
+  → sample(replay_ratio × buffer_size) retrieves old experiences
+  → extra optimizer step on replay loss
+  → Gershgorin decay protects against eigenvalue drift from replay
+  → Davis-Kahan during dreaming keeps subspaces aligned
+```
+
+The buffer is persisted in `state.json` alongside the entity state and restored
+on `load_soul`.
+
 ## Usage
 
 ### CLI Commands
@@ -108,10 +137,16 @@ Loss_total = Loss_NLL + λ · ‖sin Θ(V_base, V_soul)‖_F
 # Basic feed (incremental LoRA fine-tuning)
 rengongtong feed "Your text here" --steps 5
 
+# Feed with experience replay buffer (capacity 200, NLL mode)
+rengongtong feed "Your text here" --replay-capacity 200 --replay-mode nll
+
+# Feed with distillation replay
+rengongtong feed "Your text here" -R 200 --replay-mode distill
+
 # Chat with the entity
 rengongtong chat "Hello, how are you?"
 
-# Check status (age, mood, stability, token count)
+# Check status (age, mood, stability, token count, replay count)
 rengongtong status
 
 # Trigger a dream cycle (self-distillation)
@@ -123,15 +158,17 @@ rengongtong save
 # List all saved souls
 rengongtong list-souls
 
-# Interactive mode with full lifecycle
-rengongtong run
+# Interactive mode with full lifecycle and replay
+rengongtong run -R 200 --replay-mode nll
 ```
 
 ### Feeding Best Practices
 
-- **Use moderate steps** (3–10). SmolLM2-135M is small — 50+ steps of repetitive
+- **Use moderate steps** (3–10). SmolLM2-1.7B is small — 50+ steps of repetitive
   text can overwhelm the LoRA adapters even with MPT protection.
 - **Vary your text**. Multiple short feeds are better than one long repetitive one.
+- **Enable replay** with `--replay-capacity 200` to consolidate old knowledge
+  alongside new data without extra feeds.
 - **Watch perplexity** via `status`. If it drops below 3.0, the entity is bored
   and needs more diverse input.
 
@@ -152,7 +189,8 @@ counteract this drift.
 
 ### Interactive Mode (`run`)
 
-The `run` command starts an interactive REPL with a background metabolic loop:
+The `run` command starts an interactive REPL with a background metabolic loop.
+Pass `--replay-capacity` to enable the experience replay buffer:
 
 ```
 Réngōng tóng is awake. Type your messages or commands.
@@ -174,7 +212,7 @@ You > /quit
 
 ```python
 from rengongtong.brain import Brain
-from rengongtong._types import MptConfig, DecayMode
+from rengongtong._types import MptConfig, DecayMode, ReplayConfig
 
 mpt = MptConfig(
     decay_mode=DecayMode.HYBRID,              # Gershgorin + saliency
@@ -185,7 +223,14 @@ mpt = MptConfig(
     subspace_rank=8,                          # number of singular vectors to align
 )
 
-brain = Brain(mpt=mpt)
+replay = ReplayConfig(
+    mode="nll",                               # nll | distill
+    strategy="fifo",                          # fifo | importance
+    capacity=200,
+    replay_ratio=0.3,
+)
+
+brain = Brain(mpt=mpt, replay=replay)
 brain.feed("The sky is neon green.", steps=50)
 
 from rengongtong.dreaming import ConsolidationRoutine
@@ -215,8 +260,8 @@ souls/
 ```
 
 The `state.json` captures the entity's age, mood, personality traits, memory
-counters, and **stability metrics** — the complete "state of mind" at snapshot
-time.
+counters, **replay buffer state**, and **stability metrics** — the complete
+"state of mind" at snapshot time.
 
 Load a previous soul:
 ```bash
@@ -229,7 +274,7 @@ rengongtong chat "Wos host du glernt?" --soul souls/a1b2c3.../
 
 ```bash
 uv sync --dev           # includes pytest, ruff, mypy
-uv run pytest           # 130+ tests
+uv run pytest           # 144 tests
 uv run ruff check .     # linting
 uv run mypy rengongtong  # type checking
 ```

@@ -67,6 +67,7 @@ class EntityState(BaseModel):
     total_dreams: int = 0
     total_decays: int = 0
     total_tokens_seen: int = 0
+    replay_count: int = 0
     mood: Mood = Mood.NEUTRAL
     high_attention_mode: bool = False
     curiosity_level: float = 0.5
