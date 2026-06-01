@@ -27,10 +27,17 @@ class PerplexityReport(BaseModel):
     is_bored: bool = False
 
 
+class StabilityReport(BaseModel):
+    stability_gap: float
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    is_unstable: bool = False
+
+
 class TrainingReport(BaseModel):
     steps: int
     loss: float | None = None
     perplexity_after: float | None = None
+    stability_gap: float | None = None
     duration_seconds: float
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -63,6 +70,7 @@ class EntityState(BaseModel):
     mood: Mood = Mood.NEUTRAL
     high_attention_mode: bool = False
     curiosity_level: float = 0.5
+    stability_gap: float = 0.0
     personality_traits: dict[str, float] = Field(default_factory=lambda: {
         "franconian_grumpiness": 0.3,
         "scholarly_humility": 0.5,

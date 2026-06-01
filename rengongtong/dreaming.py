@@ -10,7 +10,9 @@ from torch.optim import AdamW
 from transformers import PreTrainedModel, PreTrainedTokenizerFast
 
 from rengongtong._jinja import TEMPLATES_DIR, env, render_template
+from rengongtong._spectral import subspace_rotation_loss
 from rengongtong._state import TrainingReport
+from rengongtong._types import TensorDict
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +39,10 @@ class ConsolidationRoutine:
       2. Generates reflective prompts that relate concepts.
       3. Generates answers to those prompts.
       4. Fine-tunes on the synthetic Q&A pairs to harden synaptic links.
+
+    When *subspace_protection_weight* > 0, a Davis-Kahan sin-Θ loss term
+    is added during training to prevent the principal singular vectors
+    from rotating away from the base model.
     """
 
     def __init__(
@@ -44,10 +50,27 @@ class ConsolidationRoutine:
         model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerFast,
         num_prompts: int = NUM_REFLECTIVE_PROMPTS,
+        subspace_protection_weight: float = 0.0,
+        subspace_rank: int = 8,
     ) -> None:
         self._model = model
         self._tokenizer = tokenizer
         self.num_prompts = num_prompts
+        self.subspace_protection_weight = subspace_protection_weight
+        self.subspace_rank = subspace_rank
+        self._base_weights: TensorDict | None = None
+
+    def _get_lora_weights(self) -> TensorDict:
+        return {
+            name: param.detach().cpu().clone()
+            for name, param in self._model.named_parameters()
+            if "lora_" in name
+        }
+
+    def capture_base_subspace(self) -> None:
+        """Snapshot current LoRA weights as the reference subspace."""
+        self._base_weights = self._get_lora_weights()
+        log.debug("Base subspace captured (%d LoRA tensors)", len(self._base_weights))
 
     @torch.inference_mode()
     def extract_concepts(self, num_concepts: int = 10) -> list[str]:
@@ -136,6 +159,10 @@ class ConsolidationRoutine:
         params = [p for p in self._model.parameters() if p.requires_grad]
         optim = AdamW(params, lr=DREAM_LR)
 
+        # Capture reference subspace if not already set
+        if self.subspace_protection_weight > 0 and self._base_weights is None:
+            self.capture_base_subspace()
+
         for question, answer in pairs:
             text = render_template(
                 "dreaming/train_text.j2",
@@ -154,7 +181,6 @@ class ConsolidationRoutine:
             labels = input_ids.clone()
             labels[labels == self._tokenizer.pad_token_id] = -100
 
-            # Only train on the assistant's answer — mask template tokens
             eos = (input_ids[0] == self._tokenizer.eos_token_id).nonzero(as_tuple=True)[0]
             if len(eos) >= 3:
                 labels[0, : eos[1].item() + 1] = -100
@@ -167,6 +193,17 @@ class ConsolidationRoutine:
                     labels=labels,
                 )
                 loss = outputs.loss
+
+                # Davis-Kahan subspace protection loss
+                if self.subspace_protection_weight > 0 and self._base_weights is not None:
+                    current = self._get_lora_weights()
+                    dk_loss = subspace_rotation_loss(
+                        self._base_weights,
+                        current,
+                        rank=self.subspace_rank,
+                    )
+                    loss = loss + self.subspace_protection_weight * dk_loss
+
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(params, 1.0)
                 optim.step()

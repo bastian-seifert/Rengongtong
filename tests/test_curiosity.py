@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import pytest
+import torch
 
-from rengongtong._state import PerplexityReport
+from rengongtong._state import PerplexityReport, StabilityReport
 from rengongtong.curiosity import CuriosityController
 
 
@@ -46,6 +47,33 @@ class TestCuriosityControllerLogic:
 
         assert ctrl.goldilocks_low == 3.0
         assert ctrl.goldilocks_high == 20.0
+
+    def test_pseudospectral_config(self):
+        ctrl = CuriosityController.__new__(CuriosityController)
+        ctrl.pseudospectral_epsilon = 1e-5
+        ctrl.pseudospectral_threshold = 10.0
+        assert ctrl.pseudospectral_epsilon == 1e-5
+        assert ctrl.pseudospectral_threshold == 10.0
+
+    def test_last_stability_default_none(self):
+        ctrl = CuriosityController.__new__(CuriosityController)
+        ctrl.last_stability = None
+        assert ctrl.last_stability is None
+
+
+class TestStabilityReport:
+    def test_default_creation(self):
+        r = StabilityReport(stability_gap=0.5)
+        assert r.stability_gap == 0.5
+        assert r.is_unstable is False
+
+    def test_unstable_flag(self):
+        r = StabilityReport(stability_gap=15.0, is_unstable=True)
+        assert r.is_unstable is True
+
+    def test_timestamp_set(self):
+        r = StabilityReport(stability_gap=1.0)
+        assert r.timestamp is not None
 
 
 class TestCuriosityReportClassification:

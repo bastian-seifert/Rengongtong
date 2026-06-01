@@ -6,6 +6,7 @@ import math
 import torch
 import pytest
 
+from rengongtong._types import DecayMode
 from rengongtong.metabolism import MetabolicLoop
 
 
@@ -22,6 +23,26 @@ class TestMetabolicLoop:
         w = self.make_weights()
         result = loop.tick(w, delta_hours=1.0)
         assert set(result.keys()) == set(w.keys())
+
+    def test_tick_gershgorin_mode_returns_same_keys(self):
+        loop = MetabolicLoop(base_lambda=0.01, mode=DecayMode.GERSHGORIN)
+        w = self.make_weights()
+        result = loop.tick(w, delta_hours=1.0)
+        assert set(result.keys()) == set(w.keys())
+
+    def test_tick_hybrid_mode_returns_same_keys(self):
+        loop = MetabolicLoop(base_lambda=0.01, mode=DecayMode.HYBRID)
+        w = self.make_weights()
+        result = loop.tick(w, delta_hours=1.0)
+        assert set(result.keys()) == set(w.keys())
+
+    def test_gershgorin_mode_reduces_magnitude(self):
+        loop = MetabolicLoop(base_lambda=0.1, mode=DecayMode.GERSHGORIN, gershgorin_penalty=0.5)
+        w = self.make_weights()
+        before = MetabolicLoop.l2_norm(w)
+        result = loop.tick(w, delta_hours=1.0)
+        after = MetabolicLoop.l2_norm(result)
+        assert after < before
 
     def test_tick_reduces_magnitude(self):
         loop = MetabolicLoop(base_lambda=0.1, saliency_gamma=0.0)  # high decay, no saliency protection

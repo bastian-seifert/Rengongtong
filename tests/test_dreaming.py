@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import random
+from unittest.mock import MagicMock
+
+import pytest
+import torch
 
 from rengongtong.dreaming import (
     ConsolidationRoutine,
@@ -94,3 +98,67 @@ class TestConsolidationRoutineConstants:
 
     def test_fallback_concepts_non_empty(self):
         assert len(FALLBACK_CONCEPTS) > 0
+
+
+class TestConsolidationRoutineSubspaceProtection:
+    """Tests for Davis-Kahan subspace protection configuration."""
+
+    def test_default_no_subspace_protection(self):
+        routine = ConsolidationRoutine.__new__(ConsolidationRoutine)
+        routine.subspace_protection_weight = 0.0
+        routine.subspace_rank = 8
+        routine._base_weights = None
+        assert routine.subspace_protection_weight == 0.0
+        assert routine.subspace_rank == 8
+        assert routine._base_weights is None
+
+    def test_subspace_protection_enabled(self):
+        routine = ConsolidationRoutine.__new__(ConsolidationRoutine)
+        routine.subspace_protection_weight = 0.1
+        routine.subspace_rank = 4
+        assert routine.subspace_protection_weight == 0.1
+        assert routine.subspace_rank == 4
+
+    def test_capture_base_subspace_no_lora_params(self):
+        model = MagicMock()
+        model.named_parameters = MagicMock(return_value=[])
+        routine = ConsolidationRoutine.__new__(ConsolidationRoutine)
+        routine._model = model
+        routine._base_weights = None
+        routine.capture_base_subspace()
+        assert routine._base_weights == {}
+
+    def test_capture_base_subspace_with_lora_params(self):
+        param = torch.nn.Parameter(torch.randn(3, 3))
+        model = MagicMock()
+        model.named_parameters = MagicMock(
+            return_value=[("lora_A.weight", param)]
+        )
+        routine = ConsolidationRoutine.__new__(ConsolidationRoutine)
+        routine._model = model
+        routine._base_weights = None
+        routine.capture_base_subspace()
+        assert routine._base_weights is not None
+        assert "lora_A.weight" in routine._base_weights
+
+    def test_get_lora_weights_empty(self):
+        model = MagicMock()
+        model.named_parameters = MagicMock(return_value=[])
+        routine = ConsolidationRoutine.__new__(ConsolidationRoutine)
+        routine._model = model
+        weights = routine._get_lora_weights()
+        assert weights == {}
+
+    def test_get_lora_weights_filters_non_lora(self):
+        model = MagicMock()
+        model.named_parameters = MagicMock(
+            return_value=[
+                ("lora_A.weight", torch.nn.Parameter(torch.randn(2, 2))),
+                ("model.weight", torch.nn.Parameter(torch.randn(2, 2))),
+            ]
+        )
+        routine = ConsolidationRoutine.__new__(ConsolidationRoutine)
+        routine._model = model
+        weights = routine._get_lora_weights()
+        assert "lora_A.weight" in weights
+        assert "model.weight" not in weights

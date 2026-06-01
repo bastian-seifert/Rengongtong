@@ -7,7 +7,8 @@ import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerFast
 
 from rengongtong._jinja import render_template
-from rengongtong._state import PerplexityReport
+from rengongtong._spectral import pseudospectral_sensitivity
+from rengongtong._state import PerplexityReport, StabilityReport
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +20,10 @@ class CuriosityController:
     (mid-range perplexity) the model is in an optimal learning state.
     In boredom (low perplexity) it must seek high-entropy information
     from the user.
+
+    Also measures *pseudospectral stability* — a resolvent-style norm
+    that detects when the model's hidden states are near a dangerous
+    region where tiny weight perturbations cause large output swings.
     """
 
     def __init__(
@@ -29,6 +34,8 @@ class CuriosityController:
         goldilocks_high: float = 20.0,
         boredom_threshold: float = 3.0,
         window_tokens: int = 512,
+        pseudospectral_epsilon: float = 1e-5,
+        pseudospectral_threshold: float = 10.0,
     ) -> None:
         self._model = model
         self._tokenizer = tokenizer
@@ -36,8 +43,11 @@ class CuriosityController:
         self.goldilocks_high = goldilocks_high
         self.boredom_threshold = boredom_threshold
         self.window_tokens = window_tokens
+        self.pseudospectral_epsilon = pseudospectral_epsilon
+        self.pseudospectral_threshold = pseudospectral_threshold
 
         self.last_report: PerplexityReport | None = None
+        self.last_stability: StabilityReport | None = None
         self.proactive_question_count = 0
 
     @torch.inference_mode()
@@ -70,6 +80,29 @@ class CuriosityController:
             is_bored=ppl < self.boredom_threshold,
         )
         self.last_report = report
+        return report
+
+    @torch.inference_mode()
+    def measure_stability(self, input_ids: torch.Tensor) -> StabilityReport:
+        """Measure pseudospectral stability via finite perturbation.
+
+        Injects ε-scale noise into LoRA weights, measures the logit
+        divergence ‖logits - logits_perturbed‖, then removes the noise.
+
+        A large *stability_gap* means the model is near a pseudospectral
+        danger zone where it is likely to hallucinate or behave erratically.
+        """
+        self._model.eval()
+        gap = pseudospectral_sensitivity(
+            forward_fn=self._model,
+            input_ids=input_ids,
+            epsilon=self.pseudospectral_epsilon,
+        )
+        report = StabilityReport(
+            stability_gap=gap.item(),
+            is_unstable=gap.item() > self.pseudospectral_threshold,
+        )
+        self.last_stability = report
         return report
 
     def should_ask_question(self, report: PerplexityReport | None = None) -> bool:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -7,9 +8,40 @@ import torch
 
 from rengongtong._state import EntityState, TrainingReport
 
-type TensorDict = dict[str, torch.Tensor]
-type LoRAWeightMatrix = torch.Tensor
-type SoulPath = Path
+TensorDict = dict[str, torch.Tensor]
+LoRAWeightMatrix = torch.Tensor
+SoulPath = Path
+
+
+# ---------------------------------------------------------------------------
+# MPT Configuration
+# ---------------------------------------------------------------------------
+
+
+class DecayMode:
+    SALIENCY = "saliency"
+    GERSHGORIN = "gershgorin"
+    HYBRID = "hybrid"
+
+
+@dataclass(frozen=True)
+class MptConfig:
+    """Configuration for Matrix Perturbation Theory enhancements.
+
+    All three MPT concepts can be toggled independently.
+    """
+
+    decay_mode: str = DecayMode.SALIENCY
+    gershgorin_penalty: float = 0.1
+    pseudospectral_epsilon: float = 1e-5
+    pseudospectral_threshold: float = 10.0
+    subspace_protection_weight: float = 0.0
+    subspace_rank: int = 8
+
+
+# ---------------------------------------------------------------------------
+# Protocols
+# ---------------------------------------------------------------------------
 
 
 @runtime_checkable
