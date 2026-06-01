@@ -14,6 +14,7 @@ import torch
 from torch.optim import AdamW
 from transformers import PreTrainedModel, PreTrainedTokenizerFast
 
+from rengongtong._spectral import spectral_projection_step, prune_lora_rank
 from rengongtong._jinja import render_template
 from rengongtong._state import EntityState, Mood, PerplexityReport, TrainingReport
 from rengongtong._types import MptConfig, ReplayConfig, TensorDict
@@ -99,7 +100,14 @@ class Brain:
     # Feeding — incremental learning
     # ------------------------------------------------------------------
 
-    def feed(self, text: str | list[str], steps: int = FEED_STEPS) -> TrainingReport:
+    def feed(
+        self,
+        text: str | list[str],
+        steps: int = FEED_STEPS,
+        custom_loss_fn: (
+            callable[[PreTrainedModel, dict, TensorDict], Tensor | None] | None
+        ) = None,
+    ) -> TrainingReport:
         """Incrementally fine-tune on *text*.  This is how the entity 'eats'."""
         if isinstance(text, str):
             texts = [text]
@@ -118,9 +126,29 @@ class Brain:
             optim.zero_grad()
             outputs = self.model(**batch)
             loss = outputs.loss
+            if custom_loss_fn is not None:
+                extra = custom_loss_fn(self.model, batch, outputs)
+                if extra is not None:
+                    loss = loss + extra
             loss.backward()
             torch.nn.utils.clip_grad_norm_(params, 1.0)
             optim.step()
+
+            retention = self.mpt.spectral_sparsity_retention
+            if retention < 1.0:
+                spectral_projection_step(self.model, retention)
+
+            if self.mpt.adaptive_rank_enabled and step % self.mpt.adaptive_rank_frequency == 0:
+                rank_changes = prune_lora_rank(
+                    self.model, self.mpt.adaptive_rank_target_variance,
+                )
+                if rank_changes:
+                    n_reduced = sum(1 for v in rank_changes.values() if v < self._synapse.lora_r)
+                    log.debug(
+                        "adaptive_rank: %d/%d layers reduced (freq=%d)",
+                        n_reduced, len(rank_changes), self.mpt.adaptive_rank_frequency,
+                    )
+
             total_loss += loss.item()
 
         avg_loss = total_loss / steps

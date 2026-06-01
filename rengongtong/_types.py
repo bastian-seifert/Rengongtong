@@ -37,6 +37,10 @@ class MptConfig:
     pseudospectral_threshold: float = 10.0
     subspace_protection_weight: float = 0.0
     subspace_rank: int = 8
+    spectral_sparsity_retention: float = 1.0
+    adaptive_rank_enabled: bool = False
+    adaptive_rank_target_variance: float = 0.95
+    adaptive_rank_frequency: int = 5
 
 
 # ---------------------------------------------------------------------------

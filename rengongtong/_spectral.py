@@ -5,6 +5,8 @@ tensors — no model references.  Designed for torch.compile compatibility.
 """
 from __future__ import annotations
 
+import math
+
 import torch
 
 from rengongtong._types import LoRAWeightMatrix, TensorDict
@@ -184,7 +186,7 @@ def pseudospectral_sensitivity(
     """
     out1 = forward_fn(input_ids, attention_mask=attention_mask, labels=labels)
     logits_1 = out1.logits if hasattr(out1, "logits") else out1
-    norm_1 = torch.norm(logits_1)
+    norm_1 = logits_1.float().norm()
 
     _inject_lora_noise(forward_fn, epsilon)
 
@@ -193,7 +195,7 @@ def pseudospectral_sensitivity(
 
     _remove_lora_noise(forward_fn, epsilon)
 
-    gap = torch.norm(logits_1 - logits_2)
+    gap = (logits_1.float() - logits_2.float()).norm()
     return gap / norm_1 if normalize else gap
 
 
@@ -275,3 +277,249 @@ def compute_saliency(weights: TensorDict) -> TensorDict:
         name: w.abs() / (w.abs().max() + 1e-8)
         for name, w in weights.items()
     }
+
+
+# ---------------------------------------------------------------------------
+# DCT-based spectral sparsity (SpectralLoRA-style)
+# ---------------------------------------------------------------------------
+
+
+def _dct_matrix(n: int, device: torch.device | None = None) -> torch.Tensor:
+    """DCT type-II matrix of size n×n:  T[k, i] = cos(π/n · (i + 0.5) · k)."""
+    i = torch.arange(n, device=device)
+    k = torch.arange(n, device=device)
+    return torch.cos(math.pi / n * (i + 0.5) * k[:, None])
+
+
+def dct_2d(tensor: LoRAWeightMatrix) -> LoRAWeightMatrix:
+    """2D Discrete Cosine Transform (type-II) via separable matrix multiplication.
+
+    D = T_N @ X @ T_M^T   where T_N[k,i] = cos(π/N·(i+½)·k), T_M[l,j] = cos(π/M·(j+½)·l)
+    """
+    N, M = tensor.shape
+    T_n = _dct_matrix(N, tensor.device)
+    T_m = _dct_matrix(M, tensor.device)
+    return T_n @ tensor.float() @ T_m.T
+
+
+def idct_2d(coeff: LoRAWeightMatrix) -> LoRAWeightMatrix:
+    """2D Inverse Discrete Cosine Transform (type-III).
+
+    X = T_N^T · B_N · D · B_M · T_M
+    where B_N = diag(1/N, 2/N, ..., 2/N) and B_M = diag(1/M, 2/M, ..., 2/M).
+    """
+    N, M = coeff.shape
+    T_n = _dct_matrix(N, coeff.device)
+    T_m = _dct_matrix(M, coeff.device)
+    B_n = torch.diag(torch.cat([
+        torch.tensor([1.0 / N], device=coeff.device),
+        torch.full([N - 1], 2.0 / N, device=coeff.device),
+    ]))
+    B_m = torch.diag(torch.cat([
+        torch.tensor([1.0 / M], device=coeff.device),
+        torch.full([M - 1], 2.0 / M, device=coeff.device),
+    ]))
+    return T_n.T @ B_n @ coeff.float() @ B_m @ T_m
+
+
+def spectral_energy_ratio(tensor: LoRAWeightMatrix, k: float = 0.5) -> float:
+    """Fraction of total spectral energy captured by the lowest k-fraction of DCT coefficients.
+
+    Low-frequency DCT coefficients (small indices) capture smooth structure.
+    A high energy ratio for small k means the weight is spectrally sparse.
+    """
+    if k <= 0 or k > 1:
+        return 1.0
+    coeff = dct_2d(tensor)
+    flat = coeff.abs().reshape(-1)
+    n_keep = max(1, int(k * flat.numel()))
+    top = flat.topk(n_keep, largest=True)
+    return (top.values.sum() / flat.sum()).item()
+
+
+def compress_lora_weight(tensor: LoRAWeightMatrix, retention: float = 0.5) -> LoRAWeightMatrix:
+    """Zero out high-frequency DCT coefficients, keeping only the lowest *retention* fraction.
+
+    *retention* = 1.0 → no compression (identity).
+    *retention* = 0.5 → keep 50% lowest-frequency coefficients.
+    """
+    if retention >= 1.0:
+        return tensor.clone()
+    coeff = dct_2d(tensor)
+    flat = coeff.abs().reshape(-1)
+    n_keep = max(1, int(retention * flat.numel()))
+    threshold = flat.kthvalue(n_keep + 1).values
+    mask = coeff.abs() >= threshold
+    coeff[~mask] = 0.0
+    return idct_2d(coeff).to(tensor.dtype)
+
+
+def lora_spectral_summary(weights: TensorDict) -> dict[str, float]:
+    """Aggregate DCT spectral sparsity metrics across all LoRA weights."""
+    energy_ratios = {}
+    for key, tensor in weights.items():
+        if "lora_" in key and tensor.ndim == 2:
+            for retention in [0.1, 0.25, 0.5]:
+                tag = f"{key}/energy_r{retention:.0%}"
+                t = tensor
+                if t.numel() > 256 * 256:
+                    t = t[:256, :256]
+                energy_ratios[tag] = round(spectral_energy_ratio(t, retention), 4)
+    return energy_ratios
+
+
+def spectral_projection_step(
+    model: torch.nn.Module,
+    retention: float,
+    skip_bias: bool = True,
+) -> dict[str, float]:
+    """After-optimizer projection: DCT-compress all LoRA A/B matrices in-place.
+
+    Returns per-weight compression ratios (fraction of coeffs zeroed).
+    """
+    metrics = {}
+    for name, param in model.named_parameters():
+        if "lora_" not in name or param.ndim != 2:
+            continue
+        if skip_bias and param.ndim < 2:
+            continue
+        compressed = compress_lora_weight(param.data, retention)
+        zeroed = (compressed == 0).count_nonzero().item()
+        total = param.numel()
+        param.data.copy_(compressed)
+        metrics[name] = round(zeroed / total, 4)
+    return metrics
+
+
+# ---------------------------------------------------------------------------
+# Adaptive rank (AdaLoRA-style pruning during training)
+# ---------------------------------------------------------------------------
+
+
+def effective_rank(
+    B: LoRAWeightMatrix,
+    A: LoRAWeightMatrix,
+    variance_threshold: float = 0.95,
+) -> int:
+    """Minimum number of singular values needed to retain *variance_threshold* of total variance.
+
+    Uses low-rank QR trick: ΔW = B @ A, computes SVD of r×r matrix.
+    """
+    if B.ndim != 2 or A.ndim != 2:
+        return max(B.shape[0] if B.ndim == 2 else 1, A.shape[0] if A.ndim == 2 else 1)
+    try:
+        _, Rb = torch.linalg.qr(B.float(), mode="reduced")
+        _, Ra = torch.linalg.qr(A.T.float(), mode="reduced")
+        S = torch.linalg.svdvals(Rb @ Ra.T)
+        total = S.sum() + 1e-10
+        if total < 1e-8:
+            return 1
+        cum = S.cumsum(0)
+        idx = (cum / total >= variance_threshold).nonzero(as_tuple=True)[0]
+        if idx.numel() == 0:
+            return B.shape[1]
+        return max(1, int(idx[0].item()) + 1)
+    except RuntimeError:
+        return B.shape[1]
+
+
+def effective_rank_summary(
+    model: torch.nn.Module,
+    variance_threshold: float = 0.95,
+) -> dict[str, int]:
+    """Aggregate effective rank per-layer across all LoRA weight pairs."""
+    b_tensors: dict[str, torch.Tensor] = {}
+    a_tensors: dict[str, torch.Tensor] = {}
+    for name, param in model.named_parameters():
+        if "lora_" not in name:
+            continue
+        # Strip adapter suffix and param leaf, e.g. "lora_B.default.weight" → "lora_B"
+        clean = name.replace(".default", "")
+        kind = clean.split(".")[-2]  # lora_A or lora_B
+        parent = clean.rsplit(".", 2)[0]
+        if kind == "lora_B":
+            b_tensors[parent] = param.data
+        elif kind == "lora_A":
+            a_tensors[parent] = param.data
+
+    ranks = {}
+    for parent in b_tensors:
+        if parent in a_tensors:
+            r = effective_rank(b_tensors[parent], a_tensors[parent], variance_threshold)
+            ranks[parent] = r
+    return ranks
+
+
+def prune_lora_rank(
+    model: torch.nn.Module,
+    target_variance: float = 0.95,
+) -> dict[str, int]:
+    """For each LoRA pair (B, A), replace B and A with truncated SVD.
+
+    This zeroes out the least important singular directions, effectively
+    reducing the model's capacity in low-saliency layers.
+
+    Uses the low-rank structure: ΔW = B @ A where B is d×r, A is r×k.
+    SVD is computed via QR decomposition for O(d·r² + r³) complexity.
+
+    Returns dict of layer_name → new_effective_rank.
+    """
+    b_params: dict[str, torch.nn.Parameter] = {}
+    a_params: dict[str, torch.nn.Parameter] = {}
+    for name, param in model.named_parameters():
+        if "lora_" not in name:
+            continue
+        clean = name.replace(".default", "")
+        kind = clean.split(".")[-2]
+        parent = clean.rsplit(".", 2)[0]
+        if kind == "lora_B":
+            b_params[parent] = param
+        elif kind == "lora_A":
+            a_params[parent] = param
+
+    new_ranks = {}
+    for parent in b_params:
+        if parent not in a_params:
+            continue
+        B = b_params[parent].data  # d × r
+        A = a_params[parent].data  # r × k
+        d, r = B.shape
+        r2, k = A.shape
+        if r != r2:
+            continue
+
+        # Efficient SVD of low-rank ΔW = B @ A using QR trick
+        try:
+            Qb, Rb = torch.linalg.qr(B.float(), mode="reduced")    # d×r, r×r
+            Qa, Ra = torch.linalg.qr(A.T.float(), mode="reduced")  # k×r, r×r
+            M = Rb @ Ra.T  # r × r
+            Um, S, Vtm = torch.linalg.svd(M, full_matrices=False)
+            U = Qb @ Um      # d × r
+            Vt = Vtm @ Qa.T  # r × k
+        except RuntimeError:
+            continue
+
+        total = S.sum() + 1e-10
+        if total < 1e-8:
+            new_ranks[parent] = 1
+            continue
+        cum = S.cumsum(0)
+        idx = (cum / total >= target_variance).nonzero(as_tuple=True)[0]
+        if idx.numel() == 0:
+            new_ranks[parent] = r
+            continue
+        n = max(1, min(int(idx[0].item()) + 1, r - 1))
+
+        if n >= r:
+            new_ranks[parent] = r
+            continue
+
+        sqrt_S = S[:n].sqrt()
+        B[:, :n].copy_(U[:, :n] * sqrt_S[None, :])
+        B[:, n:].zero_()
+        A[:n, :].copy_(Vt[:n, :] * sqrt_S[:, None])
+        A[n:, :].zero_()
+
+        new_ranks[parent] = n
+
+    return new_ranks

@@ -11,6 +11,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, P
 from transformers.utils import is_bitsandbytes_available
 
 from rengongtong._types import SoulPath, TensorDict
+from rengongtong._spectral import compress_lora_weight, lora_spectral_summary
 
 log = logging.getLogger(__name__)
 
@@ -196,12 +197,43 @@ class SynapticManager:
     # Persistence
     # ------------------------------------------------------------------
 
-    def save_adapter(self, path: SoulPath) -> None:
+    def save_adapter(
+        self,
+        path: SoulPath,
+        spectral_sparsity_retention: float | None = None,
+    ) -> dict[str, float] | None:
         path.mkdir(parents=True, exist_ok=True)
+
+        if spectral_sparsity_retention is not None and spectral_sparsity_retention < 1.0:
+            from safetensors.torch import save_file
+            from peft import get_peft_model_state_dict
+
+            state = get_peft_model_state_dict(self.model)
+            metrics = {}
+            compressed = {}
+            for key, tensor in state.items():
+                if tensor.ndim == 2:
+                    compressed[key] = compress_lora_weight(tensor, spectral_sparsity_retention)
+                    orig_norm = tensor.norm().item()
+                    diff_norm = (tensor - compressed[key]).norm().item()
+                    rel_err = diff_norm / (orig_norm + 1e-8)
+                    metrics[f"{key}/rel_recon_error"] = round(rel_err, 6)
+                else:
+                    compressed[key] = tensor
+            save_file(compressed, path / "adapter_model.safetensors", {})
+            self.tokenizer.save_pretrained(str(path))
+            self._buffer.append(path)
+            log.info(
+                "Soul saved (DCT- compressed retention=%s) to %s",
+                spectral_sparsity_retention, path,
+            )
+            return metrics
+
         self.model.save_pretrained(str(path))
         self.tokenizer.save_pretrained(str(path))
         self._buffer.append(path)
         log.info("Soul saved to %s", path)
+        return None
 
     def load_adapter(self, path: SoulPath) -> None:
         if not path.exists():
