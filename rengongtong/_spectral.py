@@ -99,15 +99,22 @@ def _match_lora_pairs(weights: TensorDict) -> list[tuple[str, LoRAWeightMatrix, 
 def gershgorin_lora_instability(
     weights: TensorDict,
 ) -> dict[str, torch.Tensor]:
-    """Gershgorin instability of the merged B@A update for each LoRA pair.
+    """Gershgorin instability of the merged LoRA update for each A/B pair.
 
-    For each matched (A, B) pair, computes ``M = B @ A`` (square for
-    attention projections like q/k/v/o where A.shape[1] == B.shape[0])
-    and returns the row-wise instability of that merged matrix.
+    Tries both ``B @ A`` and ``A @ B`` multiplication orders to handle
+    different weight storage conventions (Unsloth vs PEFT).  Only square
+    merged matrices are scored (attention projections q/k/v/o).
     """
     result: dict[str, torch.Tensor] = {}
     for key_a, A, key_b, B in _match_lora_pairs(weights):
-        merged = B @ A
+        merged: torch.Tensor | None = None
+        try:
+            merged = B @ A
+        except RuntimeError:
+            try:
+                merged = A @ B
+            except RuntimeError:
+                continue
         if merged.shape[0] != merged.shape[1]:
             continue
         result[key_a] = gershgorin_instability(merged)
@@ -126,13 +133,27 @@ def apply_lora_gershgorin_decay(
     non-square-merged tensors get uniform decay.
     """
     instabilities = gershgorin_lora_instability(weights)
+    # Build a lookup for B‑key → A‑key (same instability)
+    b_to_a: dict[str, str] = {}
+    for key_a, A, key_b, B in _match_lora_pairs(weights):
+        b_to_a[key_b] = key_a
     result: TensorDict = {}
 
     for key, tensor in weights.items():
-        if key in instabilities:
-            inst = instabilities[key]
+        lookup = key
+        if key not in instabilities and key in b_to_a:
+            lookup = b_to_a[key]
+        if lookup in instabilities:
+            inst = instabilities[lookup]
             decay = _decay_factor(lambda_base, penalty, inst)
-            result[key] = tensor * (1.0 - decay)
+            # Broadcast decay to match the weight's orientation:
+            #   A-weights (r, h) ← decay (h,) → unsqueeze(0) → (1, h)
+            #   B-weights (h, r) ← decay (h,) → unsqueeze(-1) → (h, 1)
+            if key in instabilities:
+                reshaped = (1.0 - decay).unsqueeze(0)
+            else:
+                reshaped = (1.0 - decay).unsqueeze(-1)
+            result[key] = tensor * reshaped
         else:
             result[key] = tensor * (1.0 - lambda_base)
 
@@ -145,21 +166,23 @@ def apply_lora_gershgorin_decay(
 
 
 @torch.inference_mode()
-def _inject_lora_noise(model: torch.nn.Module, epsilon: float) -> None:
-    """Add ε * N(0,1) in-place to every LoRA parameter."""
+def _inject_lora_noise(model: torch.nn.Module, epsilon: float) -> dict[str, torch.Tensor]:
+    """Add ε * N(0,1) in-place to every LoRA parameter. Returns noise dict for removal."""
+    noise_dict: dict[str, torch.Tensor] = {}
     for name, param in model.named_parameters():
         if "lora_" in name:
             noise = torch.randn_like(param) * epsilon
             param.add_(noise)
+            noise_dict[name] = noise
+    return noise_dict
 
 
 @torch.inference_mode()
-def _remove_lora_noise(model: torch.nn.Module, epsilon: float) -> None:
-    """Remove ε * N(0,1) from every LoRA parameter (revert _inject)."""
+def _remove_lora_noise(model: torch.nn.Module, noise_dict: dict[str, torch.Tensor]) -> None:
+    """Remove previously injected noise from every LoRA parameter."""
     for name, param in model.named_parameters():
-        if "lora_" in name:
-            noise = torch.randn_like(param) * epsilon
-            param.sub_(noise)
+        if name in noise_dict:
+            param.sub_(noise_dict[name])
 
 
 @torch.inference_mode()
@@ -188,12 +211,12 @@ def pseudospectral_sensitivity(
     logits_1 = out1.logits if hasattr(out1, "logits") else out1
     norm_1 = logits_1.float().norm()
 
-    _inject_lora_noise(forward_fn, epsilon)
+    noise_dict = _inject_lora_noise(forward_fn, epsilon)
 
     out2 = forward_fn(input_ids, attention_mask=attention_mask, labels=labels)
     logits_2 = out2.logits if hasattr(out2, "logits") else out2
 
-    _remove_lora_noise(forward_fn, epsilon)
+    _remove_lora_noise(forward_fn, noise_dict)
 
     gap = (logits_1.float() - logits_2.float()).norm()
     return gap / norm_1 if normalize else gap
@@ -233,7 +256,13 @@ def subspace_rotation_loss(
     top-*rank* right singular vectors and returns the mean across
     all layers.
     """
-    total = torch.tensor(0.0)
+    device = None
+    for v in base_weights.values():
+        device = v.device
+        break
+    if device is None:
+        return torch.tensor(0.0)
+    total = torch.tensor(0.0, device=device)
     count = 0
 
     for key in base_weights:

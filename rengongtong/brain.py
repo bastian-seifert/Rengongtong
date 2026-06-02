@@ -52,6 +52,7 @@ class Brain:
         soul_path: Path | str | None = None,
         lora_r: int = 16,
         lora_alpha: int = 32,
+        lora_dropout: float = 0.0,
         mpt: MptConfig | None = None,
         replay: ReplayConfig | None = None,
     ) -> None:
@@ -59,6 +60,7 @@ class Brain:
             model_name=model_name,
             lora_r=lora_r,
             lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
         )
         self.state = EntityState()
         self.mpt = mpt or MptConfig()

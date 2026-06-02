@@ -45,10 +45,10 @@ class MetabolicLoop:
         lambda_t = self._effective_lambda(delta_hours)
         result: TensorDict = {}
 
-        if self.mode is DecayMode.GERSHGORIN:
+        if self.mode == DecayMode.GERSHGORIN:
             return self._gershgorin_tick(weights, lambda_t)
 
-        if self.mode is DecayMode.HYBRID:
+        if self.mode == DecayMode.HYBRID:
             return self._hybrid_tick(weights, lambda_t)
 
         # Default: saliency-based decay (original behaviour)
