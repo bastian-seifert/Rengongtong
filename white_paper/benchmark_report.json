@@ -1,0 +1,46 @@
+[
+  {
+    "variant": "base",
+    "label": "Base model (no LoRA training)",
+    "load_time_s": 10.88,
+    "tasks": {
+      "hellaswag": {
+        "accuracy": 0.47,
+        "correct": 47,
+        "total": 100
+      },
+      "arc_challenge": {
+        "accuracy": 0.41,
+        "correct": 41,
+        "total": 100
+      },
+      "mmlu_pro": {
+        "accuracy": 0.1512,
+        "correct": 13,
+        "total": 86
+      }
+    }
+  },
+  {
+    "variant": "mpt",
+    "label": "MPT hybrid + subspace",
+    "load_time_s": 11.03,
+    "tasks": {
+      "hellaswag": {
+        "accuracy": 0.47,
+        "correct": 47,
+        "total": 100
+      },
+      "arc_challenge": {
+        "accuracy": 0.41,
+        "correct": 41,
+        "total": 100
+      },
+      "mmlu_pro": {
+        "accuracy": 0.1512,
+        "correct": 13,
+        "total": 86
+      }
+    }
+  }
+]

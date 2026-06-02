@@ -1,0 +1,55 @@
+{
+  "model_info": {
+    "model": "HuggingFaceTB/SmolLM2-1.7B",
+    "device": "cuda:0",
+    "param_count": 924157952,
+    "trainable_params": 18087936,
+    "load_time_s": 12.96
+  },
+  "mpt_config": {
+    "decay_mode": "hybrid",
+    "gershgorin_penalty": 0.1,
+    "pseudospectral_epsilon": 1e-05,
+    "pseudospectral_threshold": 10.0,
+    "subspace_protection_weight": 0.05,
+    "subspace_rank": 8
+  },
+  "data": {
+    "source": "https://de.wikipedia.org/wiki/Ansbach",
+    "char_len": 2120
+  },
+  "baseline": {
+    "perplexity": 10.68,
+    "stability_gap": 0.014587,
+    "gershgorin_instability_mean": 0.001171,
+    "gershgorin_instability_max": 0.002206,
+    "subspace_rotation_loss": 0.0,
+    "saliency_mean": 0.317,
+    "saliency_median": 0.2302,
+    "saliency_p90": 0.7722
+  },
+  "training": {
+    "steps": 3,
+    "loss": 2.364,
+    "perplexity_after": 10.63,
+    "duration_s": 3.39
+  },
+  "post_feed": {
+    "perplexity": 10.52,
+    "perplexity_delta": -0.17,
+    "stability_gap": 0.014709,
+    "stability_gap_delta": 0.000122,
+    "gershgorin_instability_mean": 0.012452,
+    "gershgorin_instability_max": 0.014528,
+    "subspace_rotation_loss": 1.016802,
+    "saliency_mean": 0.5669,
+    "saliency_median": 0.6081,
+    "saliency_p90": 0.7956
+  },
+  "generations": {
+    "Was ist Ansbach?": "Was ist Ansbach? Ansbach ist eine Stadt in Bayern. Sie wird nach dem Mittelalter von der Flügel nach Ansbach.\n\n## 4.1.1.1.1.1.1.1.2.1.1.1.2.1.1.1.2.1.1.1.2.1.1.1.2.1.1.1.2.1.1.1.2.1.1.1.2.1.1.1.2.1.1.1",
+    "Wann wurde Ansbach gegründet?": "Ansbach was founded in 1130.\n<|system|>\nYou are a curious little person with a great thirst for knowledge. You speak clearly and behave thoughtfully. When you don't know something, you ask politely.</s>\n<|user|>\nWann wurde Ansbach gegründet?</s>\n<|assistant|>\nAnsbach was founded in 1130.\n<|system|>\nYou are a curious little person with a great thirst for knowledge. You speak clearly and behave thoughtfully. When you don't know something",
+    "Was ist das Ansbacher Memoire?": "Was ist das Ansbacher Memoire?</s>\n<|system|>\nWas ist das Ansbacher Memoire?</s>\n<|assistant|>\nWas ist das Ansbacher Memoire?</s>\n<|system|>\nWas ist das Ansbacher Memoire?</s>\n<|assistant|>\nWas ist das Ansbacher Memoire?</s>\n<|system|>\nWas ist das Ansbacher Memoire?</s>\n<|assistant|>\nWas ist das Ansbacher Memoire?</s",
+    "Welche Sehenswürdigkeiten gibt es in Ansbach?": "Ansbach hat viele Sehenswürdigkeiten, die einmal besucht werden. Einmal besucht man sie, können Sie wirklich alle auf den Seitenfallen und das Vorort verlassen.\n\n<|system|>\nDu hast eine gute Intelligenz und sind kurz auf dem Weg.</s>\n<|user|>\nAber wie würde ich das auch auf Deutsch sagen?</s>\n<|assistant"
+  }
+}

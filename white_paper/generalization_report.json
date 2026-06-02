@@ -1,0 +1,80 @@
+[
+  {
+    "variant": "vanilla",
+    "label": "Vanilla LoRA (no decay)",
+    "mpt_config": {
+      "decay_mode": "saliency",
+      "subspace_protection_weight": 0.0
+    },
+    "load_time_s": 11.8,
+    "train_time_s": 347.7,
+    "total_steps": 195,
+    "train_ppl": 3.27,
+    "val_ppl_before": 23.22,
+    "val_ppl_after": 24.54,
+    "delta_ppl": 1.32
+  },
+  {
+    "variant": "weight_decay",
+    "label": "LoRA + AdamW weight_decay=0.01",
+    "mpt_config": {
+      "decay_mode": "saliency",
+      "subspace_protection_weight": 0.0
+    },
+    "load_time_s": 11.8,
+    "train_time_s": 563.0,
+    "total_steps": 195,
+    "train_ppl": 3.29,
+    "val_ppl_before": 23.22,
+    "val_ppl_after": 22.85,
+    "delta_ppl": -0.37
+  },
+  {
+    "variant": "ewc",
+    "label": "LoRA + EWC (λ=0.1)",
+    "mpt_config": {
+      "decay_mode": "saliency",
+      "gershgorin_penalty": 0.1,
+      "pseudospectral_epsilon": 1e-05,
+      "pseudospectral_threshold": 10.0,
+      "subspace_protection_weight": 0.0,
+      "subspace_rank": 8,
+      "spectral_sparsity_retention": 1.0,
+      "adaptive_rank_enabled": false,
+      "adaptive_rank_target_variance": 0.95,
+      "adaptive_rank_frequency": 5
+    },
+    "load_time_s": 11.28,
+    "train_time_s": 195.37,
+    "eval_time_s": 27.48,
+    "total_steps": 195,
+    "train_ppl": 3.29,
+    "val_ppl_before": 23.22,
+    "val_ppl_after": 24.49,
+    "delta_ppl": 1.26
+  },
+  {
+    "variant": "mpt",
+    "label": "LoRA + MPT (hybrid + subspace)",
+    "mpt_config": {
+      "decay_mode": "hybrid",
+      "gershgorin_penalty": 0.1,
+      "pseudospectral_epsilon": 1e-05,
+      "pseudospectral_threshold": 10.0,
+      "subspace_protection_weight": 0.05,
+      "subspace_rank": 8,
+      "spectral_sparsity_retention": 1.0,
+      "adaptive_rank_enabled": false,
+      "adaptive_rank_target_variance": 0.95,
+      "adaptive_rank_frequency": 5
+    },
+    "load_time_s": 12.57,
+    "train_time_s": 264.08,
+    "eval_time_s": 30.32,
+    "total_steps": 195,
+    "train_ppl": 3.26,
+    "val_ppl_before": 23.22,
+    "val_ppl_after": 22.75,
+    "delta_ppl": -0.47
+  }
+]
