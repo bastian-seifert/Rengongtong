@@ -19,9 +19,12 @@ SoulPath = Path
 
 
 class DecayMode:
+    NONE = "none"
     SALIENCY = "saliency"
     GERSHGORIN = "gershgorin"
     HYBRID = "hybrid"
+    DIAGONAL_MASS = "diagonal_mass"
+    ROTATED_GERSHGORIN = "rotated_gershgorin"
 
 
 @dataclass(frozen=True)
@@ -31,7 +34,7 @@ class MptConfig:
     All three MPT concepts can be toggled independently.
     """
 
-    decay_mode: str = DecayMode.SALIENCY
+    decay_mode: str = DecayMode.GERSHGORIN
     gershgorin_penalty: float = 0.1
     pseudospectral_epsilon: float = 1e-5
     pseudospectral_threshold: float = 10.0

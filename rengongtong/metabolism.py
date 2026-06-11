@@ -5,7 +5,7 @@ import math
 
 import torch
 
-from rengongtong._spectral import apply_lora_gershgorin_decay, compute_saliency
+from rengongtong._spectral import apply_diagonal_mass_decay, apply_lora_gershgorin_decay, apply_rotated_gershgorin_decay, compute_saliency
 from rengongtong._types import DecayMode, TensorDict
 
 log = logging.getLogger(__name__)
@@ -14,13 +14,18 @@ log = logging.getLogger(__name__)
 class MetabolicLoop:
     """Biological weight decay with configurable spectral protection.
 
-    Three decay modes are available via `DecayMode`:
+    Six decay modes are available via `DecayMode`:
 
+    * ``NONE`` — hard no-op; returns weights untouched.
     * ``SALIENCY`` — magnitude-based protection (original behaviour).
     * ``GERSHGORIN`` — penalises rows where the Gershgorin disc radius
       exceeds the diagonal, preventing eigenvalue drift.
     * ``HYBRID`` — applies both saliency protection and Gershgorin
       off-diagonal penalties.
+    * ``DIAGONAL_MASS`` — uniform off-diagonal penalty (no per-row
+      instability weighting).  Control for mechanism discrimination.
+    * ``ROTATED_GERSHGORIN`` — Gershgorin decay applied in a random
+      orthogonal basis.  Tests basis-dependence of the mechanism.
     """
 
     def __init__(
@@ -42,6 +47,9 @@ class MetabolicLoop:
 
         λ(t) = λ₀ · exp(−γ · Δt)  — the forgetting curve.
         """
+        if self.mode == DecayMode.NONE:
+            return weights
+
         lambda_t = self._effective_lambda(delta_hours)
         result: TensorDict = {}
 
@@ -50,6 +58,22 @@ class MetabolicLoop:
 
         if self.mode == DecayMode.HYBRID:
             return self._hybrid_tick(weights, lambda_t)
+
+        if self.mode == DecayMode.DIAGONAL_MASS:
+            result = apply_diagonal_mass_decay(weights, lambda_t, self.gershgorin_penalty)
+            log.debug(
+                "Diagonal-mass uniform decay: λ(t)=%.6f  penalty=%.2f",
+                lambda_t, self.gershgorin_penalty,
+            )
+            return result
+
+        if self.mode == DecayMode.ROTATED_GERSHGORIN:
+            result = apply_rotated_gershgorin_decay(weights, lambda_t, self.gershgorin_penalty)
+            log.debug(
+                "Rotated-basis Gershgorin decay: λ(t)=%.6f  penalty=%.2f",
+                lambda_t, self.gershgorin_penalty,
+            )
+            return result
 
         # Default: saliency-based decay (original behaviour)
         saliency_map = self.compute_saliency(weights)

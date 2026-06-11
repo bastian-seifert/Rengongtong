@@ -154,14 +154,11 @@ def status(
 @app.command()
 def dream(
     soul: Path = typer.Option(None, "--soul", "-S", help="Path to a soul snapshot"),
+    prompts: int = typer.Option(5, "--prompts", "-p", help="Number of reflective prompts for dreaming"),
 ) -> None:
-    """Trigger an immediate consolidation (dreaming) cycle."""
+    """Trigger an immediate consolidation (dreaming) cycle with MPT decay."""
     brain = _load_or_create_brain(soul)
-    from rengongtong.dreaming import ConsolidationRoutine
-    routine = ConsolidationRoutine(brain.model, brain.tokenizer)
-    report = routine.dream()
-    brain.state.total_dreams += 1
-    brain.state.last_dream = report.timestamp
+    report = brain.dream(num_prompts=prompts)
     brain.save_soul()
     console.print(Panel(f"[bold]Dream complete[/]\n"
                         f"Steps: {report.steps}\n"

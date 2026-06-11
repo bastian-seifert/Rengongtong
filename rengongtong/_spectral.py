@@ -161,6 +161,119 @@ def apply_lora_gershgorin_decay(
 
 
 # ---------------------------------------------------------------------------
+# Phase 3 — Mechanism discrimination controls
+# ---------------------------------------------------------------------------
+
+
+def apply_diagonal_mass_decay(
+    weights: TensorDict,
+    lambda_base: float,
+    penalty: float = 0.1,
+) -> TensorDict:
+    """Uniform off-diagonal penalty on merged BA (no per-row instability).
+
+    Uses the *mean* Gershgorin instability across all rows as a single
+    scalar penalty for every row.  If this matches per-row Gershgorin
+    decay empirically, the per-row distribution of instability carries
+    no additional information — the mechanism is simply
+    "off-diagonal → bad, penalize everything equally."
+    """
+    result: TensorDict = {}
+    for key_a, A, key_b, B in _match_lora_pairs(weights):
+        merged = B @ A
+        if merged.shape[0] != merged.shape[1]:
+            result[key_a] = A * (1.0 - lambda_base)
+            result[key_b] = B * (1.0 - lambda_base)
+            continue
+
+        inst = gershgorin_instability(merged)         # per-row
+        mean_inst = float(inst.mean().item())          # scalar: mean instability
+        decay_val = min(lambda_base + penalty * mean_inst, 1.0 - 1e-8)
+
+        # Same decay factor for EVERY row
+        result[key_a] = A * (1.0 - decay_val)
+        result[key_b] = B * (1.0 - decay_val)
+
+    for key, tensor in weights.items():
+        if key not in result:
+            result[key] = tensor * (1.0 - lambda_base)
+
+    return result
+
+
+def _random_orthogonal(n: int, device: torch.device | None = None) -> torch.Tensor:
+    """Generate a random n×n orthogonal matrix via QR decomposition."""
+    H = torch.randn(n, n, device=device)
+    Q, R = torch.linalg.qr(H)
+    # Ensure Q is orthogonal (det = ±1)
+    return Q * torch.sign(torch.diag(R))
+
+
+def apply_rotated_gershgorin_decay(
+    weights: TensorDict,
+    lambda_base: float,
+    penalty: float = 0.1,
+) -> TensorDict:
+    """Gershgorin decay applied in a random orthogonal basis.
+
+    For each layer, draws a fixed random orthogonal Q (seeded deterministically
+    by layer name so the same rotation is used across ticks) and applies
+    Gershgorin decay to Q^T M Q, then maps back.
+
+    Gershgorin discs are basis-dependent.  If the rotated version works
+    equally well, the "individual hidden dimensions carry semantic roles"
+    story in §5.1 is falsified.
+    """
+    result: TensorDict = {}
+
+    for key_a, A, key_b, B in _match_lora_pairs(weights):
+        merged = B @ A
+        d = merged.shape[0]
+        if d != merged.shape[1]:
+            result[key_a] = A * (1.0 - lambda_base)
+            result[key_b] = B * (1.0 - lambda_base)
+            continue
+
+        # Deterministic rotation: hash layer name to seed
+        seed = abs(hash(key_a)) % (2 ** 31)
+        torch.manual_seed(seed)
+        Q = _random_orthogonal(d, device=merged.device)
+
+        # Rotate: M_rot = Q^T M Q
+        M_rot = Q.T @ merged @ Q
+
+        # Apply Gershgorin decay in rotated basis
+        instability = gershgorin_instability(M_rot)
+        decay = _decay_factor(lambda_base, penalty, instability)
+        M_rot_decayed = M_rot * (1.0 - decay)
+
+        # Rotate back: M' = Q M_rot_decayed Q^T
+        M_prime = Q @ M_rot_decayed @ Q.T
+
+        # Project decay back onto A and B
+        # We want B' @ A' ≈ M_prime.  Scale both proportionally.
+        # Compute a per-row scale factor for M
+        with torch.no_grad():
+            row_norm_old = torch.norm(merged, dim=-1)
+            row_norm_new = torch.norm(M_prime, dim=-1)
+            scale = torch.where(
+                row_norm_old > 1e-8,
+                row_norm_new / row_norm_old,
+                torch.ones_like(row_norm_old),
+            )
+        # Apply scale to B (row-wise) and A (column-wise) proportionally
+        scale_sqrt = scale.sqrt()
+        result[key_a] = A * scale_sqrt.unsqueeze(0)
+        result[key_b] = B * scale_sqrt.unsqueeze(-1)
+
+    for key, tensor in weights.items():
+        if key not in result:
+            result[key] = tensor * (1.0 - lambda_base)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Pseudospectral Sensitivity
 # ---------------------------------------------------------------------------
 

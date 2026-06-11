@@ -55,6 +55,7 @@ def _make_brain() -> Brain:
     brain = Brain.__new__(Brain)
     brain._synapse = FakeSynapse()  # type: ignore[assignment]
     brain.mpt = MptConfig()
+    brain._metabolism = None  # set by __init__; None disables inline decay
     return brain
 
 
@@ -134,7 +135,7 @@ class TestBrainMood:
 class TestBrainMptConfig:
     def test_default_mpt_config(self):
         brain = _make_brain()
-        assert brain.mpt.decay_mode == "saliency"
+        assert brain.mpt.decay_mode == "gershgorin"
         assert brain.mpt.gershgorin_penalty == 0.1
         assert brain.mpt.pseudospectral_epsilon == 1e-5
 

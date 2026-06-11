@@ -17,7 +17,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizerFast
 from rengongtong._spectral import spectral_projection_step, prune_lora_rank
 from rengongtong._jinja import render_template
 from rengongtong._state import EntityState, Mood, PerplexityReport, TrainingReport
-from rengongtong._types import MptConfig, ReplayConfig, TensorDict
+from rengongtong._types import DecayMode, MptConfig, ReplayConfig, TensorDict
 from rengongtong.memory import ExperienceReplayBuffer
 from rengongtong.metabolism import MetabolicLoop
 from rengongtong.synaptic import SynapticManager
@@ -172,6 +172,15 @@ class Brain:
                 self.state.replay_count += 1
                 avg_loss = 0.7 * avg_loss + 0.3 * replay_loss.item()
 
+        # Apply metabolic decay inline after training
+        if self._metabolism is not None and self.mpt.decay_mode != DecayMode.NONE:
+            weights = self._synapse.get_lora_weights()
+            delta = max(0.001, token_count / 15000.0)
+            decayed = self._metabolism.tick(weights, delta_hours=delta)
+            self._synapse.set_lora_weights(decayed)
+            self.state.total_decays += 1
+            self.state.last_decay = datetime.now(timezone.utc)
+
         self.model.eval()
         elapsed = time.perf_counter() - t0
 
@@ -190,6 +199,44 @@ class Brain:
         log.info(
             "Feed complete — loss=%.4f  ppl=%.2f  tokens=%d  duration=%.2fs",
             avg_loss, perplexity, token_count, elapsed,
+        )
+        return report
+
+    # ------------------------------------------------------------------
+    # Dreaming — self-distillation consolidation
+    # ------------------------------------------------------------------
+
+    def dream(
+        self,
+        num_prompts: int = 5,
+    ) -> TrainingReport:
+        """Run one full consolidation (dreaming) cycle with MPT decay."""
+        from rengongtong.dreaming import ConsolidationRoutine
+
+        routine = ConsolidationRoutine(
+            self.model,
+            self.tokenizer,
+            num_prompts=num_prompts,
+            subspace_protection_weight=self.mpt.subspace_protection_weight,
+            subspace_rank=self.mpt.subspace_rank,
+        )
+        report = routine.dream()
+
+        self.state.total_dreams += 1
+        self.state.last_dream = report.timestamp
+
+        # Apply metabolic decay after dreaming
+        if self._metabolism is not None and self.mpt.decay_mode != DecayMode.NONE:
+            weights = self._synapse.get_lora_weights()
+            delta = max(0.001, report.steps / 100.0)
+            decayed = self._metabolism.tick(weights, delta_hours=delta)
+            self._synapse.set_lora_weights(decayed)
+            self.state.total_decays += 1
+            self.state.last_decay = datetime.now(timezone.utc)
+
+        log.info(
+            "Dream complete — steps=%d  loss=%.4f  duration=%.2fs",
+            report.steps, report.loss, report.duration_seconds,
         )
         return report
 

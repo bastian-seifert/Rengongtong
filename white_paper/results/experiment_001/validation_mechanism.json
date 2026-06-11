@@ -1,0 +1,59 @@
+{
+  "experiment": "mpt-mechanism-validation-135M",
+  "timestamp": "2026-06-11T20:30:00+00:00",
+  "purpose": "Phase 1.5 + Phase 3 mechanism discrimination (quick validation on laptop GPU)",
+  "hardware": "NVIDIA RTX A5000 Laptop GPU 16GB",
+  "config": {
+    "model": "SmolLM2-135M",
+    "n_train": 100,
+    "n_val": 500,
+    "n_epochs": 15,
+    "batch_size": 8,
+    "lr": 5e-5,
+    "seed": 42
+  },
+  "reproducibility_note": "1.7B vanilla run with identical config produced Δ=+1.75 vs experiment_001's Δ=-0.16 (seed 42), confirming environment sensitivity documented in §8.",
+  "conditions": {
+    "vanilla": {
+      "decay_mode": "none",
+      "val_ppl_before": 39.81,
+      "val_ppl_after": 26.95,
+      "delta_ppl": -12.86,
+      "instability_trajectory": [0.0116, 0.022, 0.0318, 0.0408, 0.0493, 0.0576, 0.0657, 0.0735, 0.0811, 0.0885, 0.0958, 0.1029, 0.1099, 0.1167, 0.1235],
+      "final_instability": 0.1235
+    },
+    "gershgorin": {
+      "decay_mode": "gershgorin",
+      "val_ppl_before": 39.81,
+      "val_ppl_after": 27.11,
+      "delta_ppl": -12.70,
+      "instability_trajectory": [0.0114, 0.0214, 0.0307, 0.039, 0.0467, 0.0538, 0.0604, 0.0665, 0.0721, 0.0772, 0.0819, 0.0863, 0.0904, 0.0942, 0.0976],
+      "final_instability": 0.0976
+    },
+    "diagonal_mass": {
+      "decay_mode": "diagonal_mass",
+      "val_ppl_before": 39.81,
+      "val_ppl_after": 27.09,
+      "delta_ppl": -12.72,
+      "instability_trajectory": [0.0114, 0.0214, 0.0307, 0.039, 0.0467, 0.0538, 0.0604, 0.0665, 0.0721, 0.0772, 0.0819, 0.0863, 0.0904, 0.0942, 0.0989],
+      "final_instability": 0.0989,
+      "note": "Uniform off-diagonal penalty using mean instability. Nearly identical to per-row Gershgorin — the per-row distribution of instability carries no additional information at this scale."
+    },
+    "rotated": {
+      "decay_mode": "rotated_gershgorin",
+      "val_ppl_before": 39.81,
+      "val_ppl_after": 27.10,
+      "delta_ppl": -12.71,
+      "instability_trajectory": [0.0118, 0.0226, 0.0328, 0.0423, 0.0481, 0.058, 0.0667, 0.0748, 0.082, 0.0832, 0.0937, 0.0992, 0.1038, 0.1075, 0.1108],
+      "final_instability": 0.1108,
+      "note": "Gershgorin decay in random orthogonal basis. Slightly less effective at suppressing instability, but generalization performance is identical."
+    }
+  },
+  "summary": {
+    "diagonal_mass_equals_gershgorin": true,
+    "rotated_slightly_less_effective": true,
+    "instability_grows_10x_in_vanilla": true,
+    "gershgorin_reduces_instability_21pct": true,
+    "diag_dominance_zero_all_conditions": "No rows of merged BA are diagonally dominant at r=16 for 135M hidden dim — Gershgorin instability is non-zero for every row."
+  }
+}

@@ -40,7 +40,7 @@ from datasets import load_dataset
 from rengongtong.brain import Brain
 from rengongtong.synaptic import BASE_MODEL
 from rengongtong._types import MptConfig, DecayMode as DM
-from rengongtong._spectral import subspace_rotation_loss, spectral_projection_step
+from rengongtong._spectral import gershgorin_lora_instability, _match_lora_pairs, subspace_rotation_loss, spectral_projection_step
 from rengongtong.metabolism import MetabolicLoop
 
 # ---------------------------------------------------------------------------
@@ -92,9 +92,12 @@ class RegularizerDef:
 
 
 def _mpt(decay_mode: str, subspace_w: float) -> MptConfig:
+    decay_penalty = 0.1 if decay_mode in (
+        DM.GERSHGORIN, DM.HYBRID, DM.DIAGONAL_MASS, DM.ROTATED_GERSHGORIN,
+    ) else 0.0
     return MptConfig(
         decay_mode=decay_mode,
-        gershgorin_penalty=0.1 if "gershgorin" in decay_mode or decay_mode == "hybrid" else 0.0,
+        gershgorin_penalty=decay_penalty,
         pseudospectral_epsilon=1e-5,
         pseudospectral_threshold=10.0,
         subspace_protection_weight=subspace_w,
@@ -102,12 +105,14 @@ def _mpt(decay_mode: str, subspace_w: float) -> MptConfig:
     )
 
 
-VANILLA   = RegularizerDef("vanilla",         "Vanilla LoRA",              MptConfig(decay_mode=DM.SALIENCY, subspace_protection_weight=0.0))
-WEIGHT_DECAY = RegularizerDef("weight_decay", "AdamW weight_decay=0.01",   MptConfig(decay_mode=DM.SALIENCY, subspace_protection_weight=0.0), weight_decay=0.01)
-DROPOUT   = RegularizerDef("dropout",         "LoRA dropout=0.1",          MptConfig(decay_mode=DM.SALIENCY, subspace_protection_weight=0.0), lora_dropout=0.1)
+VANILLA   = RegularizerDef("vanilla",         "Vanilla LoRA",              MptConfig(decay_mode=DM.NONE, subspace_protection_weight=0.0))
+WEIGHT_DECAY = RegularizerDef("weight_decay", "AdamW weight_decay=0.01",   MptConfig(decay_mode=DM.NONE, subspace_protection_weight=0.0), weight_decay=0.01)
+DROPOUT   = RegularizerDef("dropout",         "LoRA dropout=0.1",          MptConfig(decay_mode=DM.NONE, subspace_protection_weight=0.0), lora_dropout=0.1)
 MPT_FULL   = RegularizerDef("mpt_full",       "MPT (hybrid+subspace)",     _mpt("hybrid", 0.05))
 MPT_GERSH  = RegularizerDef("mpt_gershgorin", "MPT Gershgorin only",       _mpt("gershgorin", 0.0))
-MPT_SUB    = RegularizerDef("mpt_subspace",   "MPT subspace only",         _mpt("saliency", 0.05))
+MPT_SUB    = RegularizerDef("mpt_subspace",   "MPT subspace only",         _mpt("none", 0.05))
+MPT_DIAGONAL_MASS = RegularizerDef("mpt_diagonal_mass", "MPT diagonal-mass (uniform)", _mpt("diagonal_mass", 0.0))
+MPT_ROTATED = RegularizerDef("mpt_rotated",   "MPT rotated-basis Gershgorin", _mpt("rotated_gershgorin", 0.0))
 
 # ---------------------------------------------------------------------------
 # Condition matrix
@@ -213,7 +218,7 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
     mpt_cfg = cond.reg.mpt_config
     if mpt_cfg.subspace_protection_weight > 0:
         base_weights = brain._synapse.get_lora_weights()
-    if mpt_cfg.decay_mode in (DM.GERSHGORIN, DM.HYBRID):
+    if mpt_cfg.decay_mode in (DM.GERSHGORIN, DM.HYBRID, DM.DIAGONAL_MASS, DM.ROTATED_GERSHGORIN):
         metabolism = MetabolicLoop(
             mode=mpt_cfg.decay_mode,
             gershgorin_penalty=mpt_cfg.gershgorin_penalty,
@@ -225,7 +230,9 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
 
     t_train_start = time.perf_counter()
     total_steps = 0
-    epoch_ppls = []
+    epoch_ppls: list[float] = []
+    epoch_instability: list[float] = []
+    epoch_diag_dominance: list[float] = []
     for epoch in range(N_EPOCHS):
         random.shuffle(train_texts)
         epoch_loss = 0.0
@@ -268,6 +275,29 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
         if (epoch + 1) % 5 == 0 or epoch == 0 or epoch == N_EPOCHS - 1:
             print(f"    Epoch {epoch+1:>2}/{N_EPOCHS}: loss={avg:.4f}  ppl={ppl:.2f}")
 
+        # Per-epoch spectral trajectory (Phase 1.5 diagnostic)
+        lora_w_epoch = brain._synapse.get_lora_weights()
+        instabilities = gershgorin_lora_instability(lora_w_epoch)
+        if instabilities:
+            all_inst = torch.cat([v.view(-1) for v in instabilities.values()])
+            epoch_instability.append(float(all_inst.mean().item()))
+            # Diagonal-dominance ratio: fraction of rows where |diag| > R_i
+            n_dominant = 0
+            n_total = 0
+            for key_a, A, key_b, B in _match_lora_pairs(lora_w_epoch):
+                merged = B @ A
+                if merged.shape[0] != merged.shape[1]:
+                    continue
+                radii = torch.sum(torch.abs(merged), dim=-1)
+                diag = torch.abs(torch.diag(merged))
+                dominant = (diag > radii - diag).float()
+                n_dominant += int(dominant.sum().item())
+                n_total += dominant.numel()
+            epoch_diag_dominance.append(n_dominant / max(n_total, 1))
+        else:
+            epoch_instability.append(0.0)
+            epoch_diag_dominance.append(1.0)
+
     t_train = time.perf_counter() - t_train_start
 
     # Final eval
@@ -295,6 +325,21 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
     energy_r50 = [v for k, v in spectral_metrics.items() if k.endswith("energy_r50%")]
     energy_mean_r50 = sum(energy_r50) / len(energy_r50) if energy_r50 else 0.0
 
+    # Determine which regularizer components are active
+    active_components: list[str] = []
+    if mpt_cfg.decay_mode in (DM.GERSHGORIN, DM.HYBRID, DM.ROTATED_GERSHGORIN):
+        active_components.append("gershgorin_decay")
+    if mpt_cfg.decay_mode == DM.DIAGONAL_MASS:
+        active_components.append("diagonal_mass_decay")
+    if mpt_cfg.subspace_protection_weight > 0:
+        active_components.append("subspace_protection")
+    if mpt_cfg.decay_mode == DM.HYBRID:
+        active_components.append("saliency_decay")
+    if cond.reg.weight_decay > 0:
+        active_components.append("weight_decay")
+    if cond.reg.lora_dropout > 0:
+        active_components.append("lora_dropout")
+
     result: dict[str, Any] = {
         "tag": cond.tag,
         "model": cond.model.name,
@@ -306,6 +351,8 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
         "train_time_s": round(t_train, 2),
         "total_steps": total_steps,
         "epoch_ppls": epoch_ppls,
+        "epoch_instability": [round(v, 6) for v in epoch_instability],
+        "epoch_diag_dominance": [round(v, 6) for v in epoch_diag_dominance],
         "train_ppl": round(train_ppl, 4),
         "val_ppl_before": round(val_ppl_before, 4),
         "val_ppl_after": round(val_ppl_after, 4),
@@ -316,7 +363,10 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
         "mpt_config": asdict(cond.reg.mpt_config),
         "lora_dropout": cond.reg.lora_dropout,
         "weight_decay": cond.reg.weight_decay,
+        "regularizer_active_components": active_components,
+        "optimizer_config": {"betas": (0.9, 0.999), "eps": 1e-8},
     }
+    result.update(_pinned_metadata())
 
     print(f"  Train: {t_train:.1f}s ({total_steps} steps)")
     print(f"  Train PPL: {train_ppl:.2f}  |  Val: {val_ppl_before:.2f} → {val_ppl_after:.2f}  (Δ={result['delta_ppl']:+.2f})")
@@ -331,7 +381,8 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
 # Persistence
 # ---------------------------------------------------------------------------
 
-def save_commit_info():
+def _pinned_metadata() -> dict[str, Any]:
+    """Capture reproducible-environment metadata."""
     try:
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5,
@@ -342,12 +393,22 @@ def save_commit_info():
     except Exception:
         commit = "unknown"
         dirty = ""
-    info = {
+    gpu_name = "none"
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0)
+    return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "commit": commit,
+        "git_commit": commit,
         "dirty": bool(dirty),
         "host": os.uname().nodename,
+        "gpu": gpu_name,
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda or "none",
     }
+
+
+def save_commit_info():
+    info = _pinned_metadata()
     (ROOT / "commit_info.json").write_text(json.dumps(info, indent=2))
     return info
 

@@ -1,0 +1,60 @@
+{
+  "experiment": "mpt-mechanism-n500-135M",
+  "timestamp": "2026-06-11T22:00:00+00:00",
+  "purpose": "Test whether per-row Gershgorin information matters at larger data scale (n=500 vs n=100).",
+  "hardware": "NVIDIA RTX A5000 Laptop GPU 16GB",
+  "config": {
+    "model": "SmolLM2-135M",
+    "n_train": 500,
+    "n_val": 500,
+    "n_epochs": 15,
+    "batch_size": 8,
+    "lr": 5e-5,
+    "seed": 42,
+    "lora_r": 16
+  },
+  "conditions": {
+    "vanilla": {
+      "decay_mode": "none",
+      "val_ppl_before": 39.81,
+      "val_ppl_after": 26.64,
+      "delta_ppl": -13.18,
+      "final_instability": 0.3011,
+      "instability_trajectory": [0.0212, 0.0519, 0.0832, 0.1131, 0.1410, 0.1663, 0.1908, 0.2146, 0.2375, 0.2577, 0.2761, 0.2924, 0.3030, 0.3100, 0.3011],
+      "train_time_s": 422
+    },
+    "gershgorin": {
+      "decay_mode": "gershgorin",
+      "val_ppl_before": 39.81,
+      "val_ppl_after": 25.94,
+      "delta_ppl": -13.87,
+      "final_instability": 0.1897,
+      "instability_trajectory": [0.0420, 0.0757, 0.1023, 0.1213, 0.1343, 0.1447, 0.1530, 0.1602, 0.1665, 0.1721, 0.1772, 0.1811, 0.1847, 0.1876, 0.1897],
+      "train_time_s": 515
+    },
+    "diagonal_mass": {
+      "decay_mode": "diagonal_mass",
+      "val_ppl_before": 39.81,
+      "val_ppl_after": 26.01,
+      "delta_ppl": -13.81,
+      "final_instability": 0.1954,
+      "instability_trajectory": [0.0421, 0.0761, 0.1030, 0.1223, 0.1359, 0.1468, 0.1555, 0.1631, 0.1697, 0.1757, 0.1813, 0.1857, 0.1896, 0.1929, 0.1954],
+      "train_time_s": 503
+    }
+  },
+  "comparison": {
+    "vanilla_vs_gershgorin_ppl_diff": -0.69,
+    "gershgorin_vs_diagonal_mass_ppl_diff": 0.06,
+    "vanilla_final_instability": 0.3011,
+    "gershgorin_final_instability": 0.1897,
+    "diagonal_mass_final_instability": 0.1954,
+    "instability_suppression_gershgorin_vs_vanilla_pct": 37.0,
+    "instability_suppression_diagonal_vs_vanilla_pct": 35.1
+  },
+  "decision": {
+    "gershgorin_beats_diagonal_mass_by_gt_0.3_ppl": false,
+    "gershgorin_eq_diagonal_mass_within_0.1_ppl": true,
+    "mechanism_conclusion": "Uniform off-diagonal penalty is sufficient. Per-row Gershgorin weighting is incidental at 135M even at n=500.",
+    "action": "Downgrade §5.1 semantic-roles story. Reposition contribution: MPT's benefit is from off-diagonal regularization of merged BA, not from per-row instability conditioning."
+  }
+}
