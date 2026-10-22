@@ -125,6 +125,7 @@ class TestConsolidationRoutineSubspaceProtection:
         routine = ConsolidationRoutine.__new__(ConsolidationRoutine)
         routine._model = model
         routine._base_weights = None
+        routine.subspace_rank = 2
         routine.capture_base_subspace()
         assert routine._base_weights == {}
 
@@ -137,6 +138,7 @@ class TestConsolidationRoutineSubspaceProtection:
         routine = ConsolidationRoutine.__new__(ConsolidationRoutine)
         routine._model = model
         routine._base_weights = None
+        routine.subspace_rank = 2
         routine.capture_base_subspace()
         assert routine._base_weights is not None
         assert "lora_A.weight" in routine._base_weights
@@ -162,3 +164,34 @@ class TestConsolidationRoutineSubspaceProtection:
         weights = routine._get_lora_weights()
         assert "lora_A.weight" in weights
         assert "model.weight" not in weights
+
+
+class TestSubspaceProtectionGradient:
+    """Regression: the penalty used to be computed on detached copies (no gradient)."""
+
+    def test_live_parameters_keep_autograd_graph(self):
+        param = torch.nn.Parameter(torch.randn(4, 6))
+        model = MagicMock()
+        model.named_parameters = MagicMock(return_value=[("x.lora_A.weight", param)])
+        routine = ConsolidationRoutine.__new__(ConsolidationRoutine)
+        routine._model = model
+        live = routine._get_lora_parameters()
+        assert live["x.lora_A.weight"] is param
+
+    def test_capture_computes_bases_and_penalty_has_gradient(self):
+        from rengongtong._spectral import subspace_leakage_loss
+
+        param = torch.nn.Parameter(torch.randn(4, 6))
+        model = MagicMock()
+        model.named_parameters = MagicMock(return_value=[("x.lora_A.weight", param)])
+        routine = ConsolidationRoutine.__new__(ConsolidationRoutine)
+        routine._model = model
+        routine.subspace_rank = 2
+        routine.capture_base_subspace()
+        assert routine._base_bases is not None
+        assert routine._base_bases["x.lora_A.weight"].shape == (6, 2)
+
+        loss = subspace_leakage_loss(routine._base_bases, routine._get_lora_parameters())
+        loss.backward()
+        assert param.grad is not None
+        assert param.grad.abs().sum() > 0

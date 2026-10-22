@@ -64,7 +64,33 @@ class TestSynapticManagerAdapterScaling:
         assert mgr.model.peft_config["default"].scaling == 64 / 16
 
 
+class TestSynapticManagerRuntimeScaling:
+    def test_updates_lora_layer_scaling_dicts(self):
+        """PEFT's forward() reads LoraLayer.scaling[adapter], not peft_config."""
+        layer = torch.nn.Module()
+        layer.scaling = {"default": 2.0}
+        model = torch.nn.Sequential(layer)
+        mgr = SynapticManager.__new__(SynapticManager)
+        mgr._base_alpha = 32
+        mgr.lora_r = 16
+        mgr.model = model
+
+        mgr.adapter_scaling(factor=0.5)
+        assert layer.scaling["default"] == 16 / 16
+
+
 class TestSynapticManagerWeights:
+    def test_get_lora_parameters_are_live(self):
+        param = torch.nn.Parameter(torch.randn(2, 2))
+        mgr = SynapticManager.__new__(SynapticManager)
+        mgr.model = MagicMock()
+        mgr.model.named_parameters = MagicMock(
+            return_value=[("x.lora_A.weight", param), ("x.weight", torch.nn.Parameter(torch.randn(2)))]
+        )
+        live = mgr.get_lora_parameters()
+        assert list(live) == ["x.lora_A.weight"]
+        assert live["x.lora_A.weight"] is param
+
     def test_get_lora_weights_empty_model(self):
         mgr = SynapticManager.__new__(SynapticManager)
         mgr.model = MagicMock()

@@ -35,7 +35,7 @@ class CuriosityController:
         boredom_threshold: float = 3.0,
         window_tokens: int = 512,
         pseudospectral_epsilon: float = 1e-5,
-        pseudospectral_threshold: float = 10.0,
+        pseudospectral_threshold: float = 0.05,
     ) -> None:
         self._model = model
         self._tokenizer = tokenizer

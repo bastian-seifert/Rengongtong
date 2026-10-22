@@ -7,14 +7,21 @@ import pytest
 import torch
 
 from rengongtong._spectral import (
+    _inject_lora_noise,
+    _remove_lora_noise,
     apply_gershgorin_decay,
     apply_lora_gershgorin_decay,
+    apply_uniform_decay,
     compute_saliency,
     gershgorin_instability,
     gershgorin_lora_instability,
     gershgorin_radii,
+    intruder_dimensions,
+    merged_update_norm,
+    principal_right_subspaces,
     pseudospectral_sensitivity,
     subspace_angle,
+    subspace_leakage_loss,
     subspace_rotation_loss,
 )
 
@@ -261,3 +268,102 @@ class TestLoRAGershgorin:
         result = apply_lora_gershgorin_decay(w, lambda_base=0.1, penalty=1.0)
         assert set(result.keys()) == set(w.keys())
         assert torch.allclose(result["some_other.weight"], w["some_other.weight"] * 0.9)
+
+
+class TestSubspaceLeakageLoss:
+    def test_zero_inside_reference_subspace(self):
+        w = torch.randn(4, 8)
+        bases = principal_right_subspaces({"a": w}, rank=4)
+        loss = subspace_leakage_loss(bases, {"a": w * 3.0})
+        assert loss.item() < 1e-5
+
+    def test_positive_when_rotated_away(self):
+        w = torch.randn(4, 8)
+        bases = principal_right_subspaces({"a": w}, rank=2)
+        loss = subspace_leakage_loss(bases, {"a": torch.randn(4, 8)})
+        assert 0.0 < loss.item() <= 1.0
+
+    def test_gradient_flows_to_live_parameter(self):
+        w = torch.randn(4, 8)
+        bases = principal_right_subspaces({"a": w}, rank=2)
+        param = torch.nn.Parameter(torch.randn(4, 8))
+        subspace_leakage_loss(bases, {"a": param}).backward()
+        assert param.grad is not None and param.grad.abs().sum() > 0
+
+    def test_detached_input_has_no_gradient(self):
+        """Documents the experiment_001 bug: detached copies make the penalty a constant."""
+        bases = principal_right_subspaces({"a": torch.randn(4, 8)}, rank=2)
+        param = torch.nn.Parameter(torch.randn(4, 8))
+        loss = subspace_leakage_loss(bases, {"a": param.detach().cpu()})
+        assert not loss.requires_grad
+
+    def test_zero_initialised_tensor_is_skipped(self):
+        bases = principal_right_subspaces({"lora_B": torch.zeros(8, 4), "lora_A": torch.randn(4, 8)}, rank=2)
+        assert "lora_B" not in bases
+        assert "lora_A" in bases
+
+    def test_no_common_keys_returns_zero(self):
+        bases = principal_right_subspaces({"a": torch.randn(3, 3)}, rank=2)
+        loss = subspace_leakage_loss(bases, {"b": torch.randn(3, 3)})
+        assert loss.item() == 0.0
+
+
+class TestNoiseInjectionRestore:
+    def _model(self, dtype: torch.dtype) -> torch.nn.Module:
+        model = torch.nn.Module()
+        model.lora_A = torch.nn.Parameter(torch.randn(8, 8).to(dtype))
+        model.other = torch.nn.Parameter(torch.randn(8, 8).to(dtype))
+        return model
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+    def test_restore_is_bit_exact(self, dtype):
+        model = self._model(dtype)
+        before = {n: p.detach().clone() for n, p in model.named_parameters()}
+        originals = _inject_lora_noise(model, epsilon=1e-2)
+        assert not torch.equal(model.lora_A, before["lora_A"])
+        assert torch.equal(model.other, before["other"])
+        _remove_lora_noise(model, originals)
+        for n, p in model.named_parameters():
+            assert torch.equal(p, before[n])
+
+
+class TestUniformDecay:
+    def test_scales_every_tensor(self):
+        w = {"a": torch.ones(2, 2), "b": torch.full((3,), 2.0)}
+        out = apply_uniform_decay(w, 0.1)
+        assert torch.allclose(out["a"], torch.full((2, 2), 0.9))
+        assert torch.allclose(out["b"], torch.full((3,), 1.8))
+
+    def test_clamped(self):
+        out = apply_uniform_decay({"a": torch.ones(2)}, 5.0)
+        assert torch.all(out["a"] >= 0)
+
+    def test_merged_norm_shrinks_quadratically(self):
+        A = torch.randn(2, 4)
+        B = torch.randn(4, 2)
+        w = {"x.lora_A.default.weight": A, "x.lora_B.default.weight": B}
+        before = merged_update_norm(w)
+        after = merged_update_norm(apply_uniform_decay(w, 0.1))
+        assert after == pytest.approx(before * 0.81, rel=1e-5)
+
+
+class TestIntruderDimensions:
+    def test_no_update_no_intruders(self):
+        W = torch.randn(16, 16)
+        assert intruder_dimensions(W, W.clone(), top_k=5) == 0
+
+    def test_strong_new_direction_is_an_intruder(self):
+        torch.manual_seed(0)
+        W = torch.randn(32, 32) * 0.1
+        u = torch.randn(32, 1)
+        u /= u.norm()
+        v = torch.randn(32, 1)
+        v /= v.norm()
+        # The new direction mixes many base singular vectors, so no single
+        # base vector has a large cosine similarity with it.
+        W_tuned = W + 50.0 * u @ v.T
+        assert intruder_dimensions(W, W_tuned, top_k=1, threshold=0.5) == 1
+
+    def test_shape_mismatch_raises(self):
+        with pytest.raises(ValueError):
+            intruder_dimensions(torch.randn(3, 3), torch.randn(3, 4))

@@ -65,6 +65,7 @@ class Brain:
         self.state = EntityState()
         self.mpt = mpt or MptConfig()
         self._metabolism = MetabolicLoop(
+            base_lambda=self.mpt.decay_base_lambda,
             mode=self.mpt.decay_mode,
             gershgorin_penalty=self.mpt.gershgorin_penalty,
         )

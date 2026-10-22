@@ -2,6 +2,59 @@
 
 **TL;DR:** A biologically-inspired weight decay that penalizes off-diagonal magnitude of merged LoRA updates (computed via Gershgorin disc instability) improves generalization across three model scales (135M–1.7B), with effects that grow with model size and training data size. At 1.7B all three mpt_full seeds improve over vanilla (ΔPPL: −1.51, −2.85, −0.02 vs vanilla), though one seed's absolute ΔPPL is +0.24 (val PPL increases from 21.78 to 22.02), so the effect is not universal across random seeds. Mechanism analysis at 135M reveals that a **uniform off-diagonal penalty** (diagonal-mass control) produces identical results to per-row Gershgorin weighting at both n=100 and n=500 training examples — the per-row Gershgorin information is incidental.
 
+## Erratum (post-publication review)
+
+The numbers below are kept as originally reported, but several of them are
+affected by implementation issues found during review.  `experiment_002`
+(`white_paper/run_experiment_paper.py`) is set up to re-measure them.
+
+1. **The subspace (Davis–Kahan) term had no gradient.**  The penalty was
+   computed on `SynapticManager.get_lora_weights()`, which returns
+   `param.detach().cpu()`.  It therefore added a constant to the loss and
+   never changed the weights.  A smoke test on a tiny PEFT model confirms
+   that training with the old penalty is *bit-identical* to training
+   without it.  Consequences:
+   - `mpt_subspace` trained exactly like `vanilla`.  Its +0.98 ΔPPL
+     (+++ across 3 seeds, bootstrap CI [+0.03, +2.15]) is therefore pure
+     run-to-run noise.  This is a useful calibration: **with 3 seeds, the
+     noise floor at 1.7B is about ±1–2 PPL**, the same size as most effects
+     reported here.
+   - `mpt_full` is the hybrid decay plus a no-op that costs ≈3× wall time
+     (SVDs on CPU every step).
+   - §2.2 and §5.3 discuss a mechanism that never ran.
+   Fixed by `subspace_leakage_loss` on the live parameters, with the
+   reference SVD computed once per run.
+2. **The weight-decay baseline was ~10⁴× weaker than MPT's shrinkage.**
+   Decoupled AdamW decay shrinks by `lr · wd = 5e-5 · 0.01 = 5e-7` per step,
+   ≈1e-4 over the whole run.  The MPT decay shrinks A and B by roughly
+   0.5–3 % per epoch.  "MPT beats weight decay" therefore compares strong
+   shrinkage with almost none.  `experiment_002` adds two baselines matched
+   to 1 % shrink per factor and epoch (`weight_decay_matched`,
+   `uniform_shrink`) and logs the actual per-tick shrink of every decay mode
+   (`epoch_shrink`) so that the match can be checked.
+3. **Validation set was used for reporting.**  There was no separate test
+   split.  `experiment_002` uses the Wikitext-2 validation split (dev) only
+   for early-stopping selection and reports on the Wikitext-2 test split,
+   both at the final epoch and at the best dev epoch.
+4. **Interpretation.**  Because no row is ever diagonally dominant (§7.2),
+   Gershgorin instability is ≈ the row's off-diagonal L1 mass.  The decay
+   is then a norm-dependent shrinkage of the merged update, which is why
+   the uniform and rotated controls match it.  Eigenvalues of a
+   non-iterated projection ΔW have no stability meaning; singular values,
+   and comparisons of W₀ + BA against W₀ (e.g. intruder dimensions,
+   Shuttleworth et al. 2024; now in `_spectral.intruder_dimensions`), are
+   the relevant quantities.
+5. **`benchmark_report.json` compared the base model with itself.**  The
+   "mpt" variant was a freshly initialised Brain (LoRA B = 0), so every
+   score is identical by construction.  `evaluate_benchmarks.py` now takes
+   trained soul directories via `--soul`.
+
+Related work to compare against: shrink-and-perturb (Ash & Adams 2020) and
+loss-of-plasticity work (Dohare et al. 2024) for the metabolic decay;
+O-LoRA / InfLoRA for subspace protection; Self-Synthesized Rehearsal
+(Huang et al. 2024) and model-collapse results (Shumailov et al. 2024) for
+the self-distillation "dreaming" phase.
+
 ## 1. Motivation
 
 Low-Rank Adaptation (LoRA) fine-tunes large language models by learning low-rank updates ΔW = BA to a frozen base model. While parameter-efficient, LoRA is not inherently regularized — the learned A and B matrices can overfit to the training distribution, especially on small data regimes.

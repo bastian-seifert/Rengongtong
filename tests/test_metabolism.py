@@ -125,6 +125,13 @@ class TestMetabolicLoop:
         after = MetabolicLoop.l2_norm(result)
         assert after < before
 
+    def test_uniform_mode_is_plain_shrinkage(self):
+        loop = MetabolicLoop(base_lambda=0.1, saliency_gamma=0.0, mode=DecayMode.UNIFORM)
+        w = self.make_weights()
+        result = loop.tick(w, delta_hours=1.0)
+        for k in w:
+            assert torch.allclose(result[k], w[k] * 0.9)
+
     def test_half_life_parameter_stored(self):
         loop = MetabolicLoop(half_life_hours=48.0)
         assert loop.half_life_hours == 48.0

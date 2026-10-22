@@ -145,17 +145,20 @@ class SynapticManager:
         factor < 1 → more conservative/stable.
         """
         new_alpha = max(1, int(self._base_alpha * factor))
-        for param_name, _ in self.model.named_parameters():
-            if "lora_" in param_name:
-                # PeFT layers store alpha on the adapter; we scale the active
-                # LoRA scaling factor at inference time via the PeftModel scaling dict.
-                pass
+        new_scaling = new_alpha / self.lora_r
 
         if hasattr(self.model, "peft_config") and self.model.peft_config:
             for adapter_name in self.model.peft_config:
                 self.model.peft_config[adapter_name].lora_alpha = new_alpha
-                # Recompute scaling = alpha / r
-                self.model.peft_config[adapter_name].scaling = new_alpha / self.lora_r
+                self.model.peft_config[adapter_name].scaling = new_scaling
+
+        # PEFT reads the per-layer ``LoraLayer.scaling[adapter]`` dict in
+        # forward(); peft_config alone is only consulted at construction.
+        for module in self.model.modules():
+            scaling = getattr(module, "scaling", None)
+            if isinstance(scaling, dict):
+                for adapter_name in scaling:
+                    scaling[adapter_name] = new_scaling
 
         log.debug("adapter_scaling → %s (factor=%.2f)", new_alpha, factor)
 
@@ -180,7 +183,20 @@ class SynapticManager:
     # Weight I/O
     # ------------------------------------------------------------------
 
+    def get_lora_parameters(self) -> TensorDict:
+        """Live LoRA parameters (on device, attached to the autograd graph).
+
+        Use this — not `get_lora_weights` — for any loss term that must
+        produce gradients.
+        """
+        return {
+            name: param
+            for name, param in self.model.named_parameters()
+            if "lora_" in name
+        }
+
     def get_lora_weights(self) -> TensorDict:
+        """Detached CPU snapshot of the LoRA weights (no gradients)."""
         names = {}
         for name, param in self.model.named_parameters():
             if "lora_" in name:

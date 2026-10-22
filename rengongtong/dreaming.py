@@ -10,7 +10,7 @@ from torch.optim import AdamW
 from transformers import PreTrainedModel, PreTrainedTokenizerFast
 
 from rengongtong._jinja import TEMPLATES_DIR, env, render_template
-from rengongtong._spectral import subspace_rotation_loss
+from rengongtong._spectral import principal_right_subspaces, subspace_leakage_loss
 from rengongtong._state import TrainingReport
 from rengongtong._types import TensorDict
 
@@ -40,9 +40,10 @@ class ConsolidationRoutine:
       3. Generates answers to those prompts.
       4. Fine-tunes on the synthetic Q&A pairs to harden synaptic links.
 
-    When *subspace_protection_weight* > 0, a Davis-Kahan sin-Θ loss term
-    is added during training to prevent the principal singular vectors
-    from rotating away from the base model.
+    When *subspace_protection_weight* > 0, a subspace-leakage loss term
+    (see `subspace_leakage_loss`) is added during training to keep the
+    LoRA weights inside the principal subspaces captured by
+    `capture_base_subspace`.
     """
 
     def __init__(
@@ -59,6 +60,7 @@ class ConsolidationRoutine:
         self.subspace_protection_weight = subspace_protection_weight
         self.subspace_rank = subspace_rank
         self._base_weights: TensorDict | None = None
+        self._base_bases: TensorDict | None = None
 
     def _get_lora_weights(self) -> TensorDict:
         return {
@@ -67,9 +69,18 @@ class ConsolidationRoutine:
             if "lora_" in name
         }
 
+    def _get_lora_parameters(self) -> TensorDict:
+        """Live LoRA parameters — required for the penalty to have a gradient."""
+        return {
+            name: param
+            for name, param in self._model.named_parameters()
+            if "lora_" in name
+        }
+
     def capture_base_subspace(self) -> None:
         """Snapshot current LoRA weights as the reference subspace."""
         self._base_weights = self._get_lora_weights()
+        self._base_bases = principal_right_subspaces(self._base_weights, self.subspace_rank)
         log.debug("Base subspace captured (%d LoRA tensors)", len(self._base_weights))
 
     @torch.inference_mode()
@@ -194,15 +205,11 @@ class ConsolidationRoutine:
                 )
                 loss = outputs.loss
 
-                # Davis-Kahan subspace protection loss
-                if self.subspace_protection_weight > 0 and self._base_weights is not None:
-                    current = self._get_lora_weights()
-                    dk_loss = subspace_rotation_loss(
-                        self._base_weights,
-                        current,
-                        rank=self.subspace_rank,
-                    )
-                    loss = loss + self.subspace_protection_weight * dk_loss
+                # Subspace protection: must use live parameters, otherwise
+                # the term is a constant and contributes no gradient.
+                if self.subspace_protection_weight > 0 and self._base_bases:
+                    leak = subspace_leakage_loss(self._base_bases, self._get_lora_parameters())
+                    loss = loss + self.subspace_protection_weight * leak.to(loss.device)
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(params, 1.0)

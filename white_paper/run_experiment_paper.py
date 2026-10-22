@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
 """Systematic experiment: MPT spectral regularization for small LMs.
 
-Design:
-  A — Scale × Regularizer (135M, 360M, 1.7B) × (vanilla, weight_decay, mpt_full) × 3 seeds
-  B — MPT component ablation (1.7B) × (mpt_gershgorin, mpt_subspace) × 3 seeds
-  C — LoRA dropout baseline (1.7B) × (dropout) × 3 seeds
+Design (experiment_002, default 5 seeds):
+  A — Scale × Regularizer (135M, 360M, 1.7B)
+        × (vanilla, weight_decay_matched, uniform_shrink, mpt_gershgorin, mpt_diagonal_mass)
+  B — Extra baselines and ablations (1.7B only)
+        × (weight_decay, dropout, mpt_full, mpt_subspace)
 
-Total: 27 + 6 + 3 = 36 training runs
+Changes vs. experiment_001 (see paper.md, "Erratum"):
+  * The subspace penalty now uses the live LoRA parameters.  In 001 it was
+    computed on detached CPU copies, so it contributed no gradient and
+    mpt_subspace / mpt_full trained exactly like vanilla / hybrid.
+  * Two shrinkage baselines matched to MPT's per-epoch shrinkage
+    (``MATCHED_SHRINK_PER_EPOCH``): AdamW weight decay at a strength that
+    actually shrinks (the 0.01 setting shrinks by ~1e-4 over the whole run)
+    and plain uniform shrinkage via `DecayMode.UNIFORM`.
+  * Train / dev / test split: per-epoch dev PPL selects the early-stopping
+    epoch, the held-out Wikitext-2 *test* split is only used for reporting.
+  * Per-tick ‖BA‖_F before/after decay is logged so that shrinkage can be
+    compared across decay modes.
 
-Expected wall time: ~2.5 hours on RTX A5000.
+Usage:
+  python white_paper/run_experiment_paper.py                       # full grid
+  python white_paper/run_experiment_paper.py --models 135M --seeds 42 73
+  python white_paper/run_experiment_paper.py --regularizers vanilla uniform_shrink
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
@@ -40,26 +56,48 @@ from datasets import load_dataset
 from rengongtong.brain import Brain
 from rengongtong.synaptic import BASE_MODEL
 from rengongtong._types import MptConfig, DecayMode as DM
-from rengongtong._spectral import gershgorin_lora_instability, _match_lora_pairs, subspace_rotation_loss, spectral_projection_step
+from rengongtong._spectral import (
+    _match_lora_pairs,
+    gershgorin_lora_instability,
+    merged_update_norm,
+    principal_right_subspaces,
+    spectral_projection_step,
+    subspace_leakage_loss,
+)
 from rengongtong.metabolism import MetabolicLoop
 
 # ---------------------------------------------------------------------------
 # Experiment root (relative to this script's location)
 # ---------------------------------------------------------------------------
 
-ROOT = _SCRIPT_DIR / "results" / "experiment_001"
-ROOT.mkdir(parents=True, exist_ok=True)
+ROOT = _SCRIPT_DIR / "results" / "experiment_002"  # overridden by --experiment
 
 # ---------------------------------------------------------------------------
 # Hyperparameters
 # ---------------------------------------------------------------------------
 
 N_TRAIN = 100
-N_VAL = 500
+N_DEV = 250      # Wikitext-2 validation split — early-stopping selection only
+N_TEST = 500     # Wikitext-2 test split — reported numbers only
 BATCH_SIZE = 8
 N_EPOCHS = 15
 FEED_LR = 5e-5
-SEEDS = [42, 73, 137]
+SEEDS = [42, 73, 137, 2024, 31337]
+DECAY_DELTA_HOURS = 1.0   # MetabolicLoop tick per epoch
+DECAY_GAMMA = 0.9         # MetabolicLoop default saliency_gamma
+
+# Fair shrinkage baselines.  MPT's Gershgorin decay scales A and B by
+# (1 − λ(t) − γ·instability) once per epoch; with λ₀ = 0.01 and the observed
+# instability (0.01–0.3, see experiment_001) that is roughly 0.5–3 % per
+# factor and epoch.  Both baselines below target 1 % per factor and epoch;
+# the logged ``epoch_shrink`` of the MPT runs shows whether that matches
+# (it measures ‖BA‖_F, so 1 % per factor ≈ 2 % there).
+MATCHED_SHRINK_PER_EPOCH = 0.01
+STEPS_PER_EPOCH = math.ceil(N_TRAIN / BATCH_SIZE)
+# Decoupled AdamW decay multiplies by (1 − lr·wd) per step.
+MATCHED_WEIGHT_DECAY = MATCHED_SHRINK_PER_EPOCH / (FEED_LR * STEPS_PER_EPOCH)
+# MetabolicLoop applies λ(t) = λ₀·exp(−γ·Δt) per tick.
+MATCHED_UNIFORM_LAMBDA0 = MATCHED_SHRINK_PER_EPOCH / math.exp(-DECAY_GAMMA * DECAY_DELTA_HOURS)
 
 # ---------------------------------------------------------------------------
 # Model definitions
@@ -91,15 +129,15 @@ class RegularizerDef:
     weight_decay: float = 0.0
 
 
-def _mpt(decay_mode: str, subspace_w: float) -> MptConfig:
+def _mpt(decay_mode: str, subspace_w: float, base_lambda: float = 0.01) -> MptConfig:
     decay_penalty = 0.1 if decay_mode in (
         DM.GERSHGORIN, DM.HYBRID, DM.DIAGONAL_MASS, DM.ROTATED_GERSHGORIN,
     ) else 0.0
     return MptConfig(
         decay_mode=decay_mode,
+        decay_base_lambda=base_lambda,
         gershgorin_penalty=decay_penalty,
         pseudospectral_epsilon=1e-5,
-        pseudospectral_threshold=10.0,
         subspace_protection_weight=subspace_w,
         subspace_rank=8,
     )
@@ -107,6 +145,11 @@ def _mpt(decay_mode: str, subspace_w: float) -> MptConfig:
 
 VANILLA   = RegularizerDef("vanilla",         "Vanilla LoRA",              MptConfig(decay_mode=DM.NONE, subspace_protection_weight=0.0))
 WEIGHT_DECAY = RegularizerDef("weight_decay", "AdamW weight_decay=0.01",   MptConfig(decay_mode=DM.NONE, subspace_protection_weight=0.0), weight_decay=0.01)
+WEIGHT_DECAY_MATCHED = RegularizerDef(
+    "weight_decay_matched", f"AdamW weight_decay={MATCHED_WEIGHT_DECAY:.2f} (shrink-matched)",
+    MptConfig(decay_mode=DM.NONE, subspace_protection_weight=0.0), weight_decay=MATCHED_WEIGHT_DECAY,
+)
+UNIFORM_SHRINK = RegularizerDef("uniform_shrink", "Uniform shrinkage (shrink-matched)", _mpt("uniform", 0.0, MATCHED_UNIFORM_LAMBDA0))
 DROPOUT   = RegularizerDef("dropout",         "LoRA dropout=0.1",          MptConfig(decay_mode=DM.NONE, subspace_protection_weight=0.0), lora_dropout=0.1)
 MPT_FULL   = RegularizerDef("mpt_full",       "MPT (hybrid+subspace)",     _mpt("hybrid", 0.05))
 MPT_GERSH  = RegularizerDef("mpt_gershgorin", "MPT Gershgorin only",       _mpt("gershgorin", 0.0))
@@ -129,34 +172,45 @@ class Condition:
         self.tag = f"{self.model.name}/{self.reg.tag}/seed{self.seed}"
 
 
-def build_conditions() -> list[Condition]:
+SCALE_REGULARIZERS = [VANILLA, WEIGHT_DECAY_MATCHED, UNIFORM_SHRINK, MPT_GERSH, MPT_DIAGONAL_MASS]
+LARGE_ONLY_REGULARIZERS = [WEIGHT_DECAY, DROPOUT, MPT_FULL, MPT_SUB]
+
+
+def build_conditions(
+    seeds: list[int],
+    models: set[str] | None = None,
+    regularizers: set[str] | None = None,
+) -> list[Condition]:
     conds = []
     # A: Scale × Regularizer
     for m in MODELS:
-        for r in [VANILLA, WEIGHT_DECAY, MPT_FULL]:
-            for s in SEEDS:
+        for r in SCALE_REGULARIZERS:
+            for s in seeds:
                 conds.append(Condition(m, r, s))
-    # B: MPT component ablation (1.7B only)
+    # B: Extra baselines and component ablation (1.7B only)
     m17 = MODELS[2]
-    for r in [MPT_GERSH, MPT_SUB]:
-        for s in SEEDS:
+    for r in LARGE_ONLY_REGULARIZERS:
+        for s in seeds:
             conds.append(Condition(m17, r, s))
-    # C: Dropout baseline (1.7B only)
-    for s in SEEDS:
-        conds.append(Condition(m17, DROPOUT, s))
-    return conds
+    return [
+        c for c in conds
+        if (models is None or c.model.label in models or c.model.name in models)
+        and (regularizers is None or c.reg.tag in regularizers)
+    ]
 
 
 # ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
 
-def load_wikitext() -> tuple[list[str], list[str]]:
+def load_wikitext() -> tuple[list[str], list[str], list[str]]:
+    """Return (train, dev, test).  Dev selects the early-stopping epoch; test is report-only."""
     print("Loading Wikitext-2...")
     ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1")
     all_train = [t for t in ds["train"]["text"] if t.strip()]
-    all_val = [t for t in ds["validation"]["text"] if t.strip()]
-    return all_train[:N_TRAIN], all_val[:N_VAL]
+    all_dev = [t for t in ds["validation"]["text"] if t.strip()]
+    all_test = [t for t in ds["test"]["text"] if t.strip()]
+    return all_train[:N_TRAIN], all_dev[:N_DEV], all_test[:N_TEST]
 
 
 def compute_ppl(model, tokenizer, texts, batch_size=8) -> float:
@@ -186,7 +240,12 @@ def compute_ppl(model, tokenizer, texts, batch_size=8) -> float:
 # Training
 # ---------------------------------------------------------------------------
 
-def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str]) -> dict[str, Any]:
+def train_condition(
+    cond: Condition,
+    train_texts: list[str],
+    dev_texts: list[str],
+    test_texts: list[str],
+) -> dict[str, Any]:
     print(f"\n{'─' * 72}")
     print(f"  [{cond.tag}]")
     print(f"  Model: {cond.model.name}  |  Reg: {cond.reg.label}  |  Seed: {cond.seed}")
@@ -207,19 +266,22 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
     t_load = time.perf_counter() - t_load_start
 
     # Baseline eval
-    t_eval_start = time.perf_counter()
-    val_ppl_before = compute_ppl(model, tokenizer, val_texts)
-    t_eval = time.perf_counter() - t_eval_start
-    print(f"  Load: {t_load:.1f}s  |  Val PPL before: {val_ppl_before:.2f}")
+    test_ppl_before = compute_ppl(model, tokenizer, test_texts)
+    dev_ppl_before = compute_ppl(model, tokenizer, dev_texts)
+    print(f"  Load: {t_load:.1f}s  |  Dev PPL before: {dev_ppl_before:.2f}  |  Test PPL before: {test_ppl_before:.2f}")
 
     # Setup MPT mechanisms
-    base_weights = None
+    subspace_bases = None
     metabolism = None
     mpt_cfg = cond.reg.mpt_config
     if mpt_cfg.subspace_protection_weight > 0:
-        base_weights = brain._synapse.get_lora_weights()
-    if mpt_cfg.decay_mode in (DM.GERSHGORIN, DM.HYBRID, DM.DIAGONAL_MASS, DM.ROTATED_GERSHGORIN):
+        subspace_bases = principal_right_subspaces(
+            brain._synapse.get_lora_weights(), mpt_cfg.subspace_rank,
+        )
+    if mpt_cfg.decay_mode not in (DM.NONE, DM.SALIENCY):
         metabolism = MetabolicLoop(
+            base_lambda=mpt_cfg.decay_base_lambda,
+            saliency_gamma=DECAY_GAMMA,
             mode=mpt_cfg.decay_mode,
             gershgorin_penalty=mpt_cfg.gershgorin_penalty,
         )
@@ -233,6 +295,11 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
     epoch_ppls: list[float] = []
     epoch_instability: list[float] = []
     epoch_diag_dominance: list[float] = []
+    epoch_dev_ppls: list[float] = []
+    epoch_shrink: list[float] = []
+    best_dev_ppl = float("inf")
+    best_epoch = 0
+    best_state: dict[str, torch.Tensor] | None = None
     for epoch in range(N_EPOCHS):
         random.shuffle(train_texts)
         epoch_loss = 0.0
@@ -245,10 +312,9 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
             outputs = model(**batch)
             loss = outputs.loss
 
-            # Subspace protection
-            if base_weights is not None:
-                current = brain._synapse.get_lora_weights()
-                sub_loss = subspace_rotation_loss(base_weights, current, mpt_cfg.subspace_rank)
+            # Subspace protection — live parameters, so the term has a gradient
+            if subspace_bases:
+                sub_loss = subspace_leakage_loss(subspace_bases, brain._synapse.get_lora_parameters())
                 loss = loss + mpt_cfg.subspace_protection_weight * sub_loss.to(loss.device)
 
             loss.backward()
@@ -266,14 +332,26 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
         # Metabolic decay (end of epoch)
         if metabolism is not None:
             lora_w = brain._synapse.get_lora_weights()
-            decayed = metabolism.tick(lora_w, delta_hours=1.0)
+            norm_before = merged_update_norm(lora_w)
+            decayed = metabolism.tick(lora_w, delta_hours=DECAY_DELTA_HOURS)
             brain._synapse.set_lora_weights(decayed)
+            norm_after = merged_update_norm(decayed)
+            # Fractional shrink of ‖BA‖_F caused by this tick
+            epoch_shrink.append(1.0 - norm_after / norm_before if norm_before > 0 else 0.0)
 
         avg = epoch_loss / max(n_batches, 1)
         ppl = math.exp(avg) if avg < 50 else float("inf")
         epoch_ppls.append(round(ppl, 4))
+
+        # Dev PPL → early-stopping selection (test split is never looked at here)
+        dev_ppl = compute_ppl(model, tokenizer, dev_texts)
+        epoch_dev_ppls.append(round(dev_ppl, 4))
+        if dev_ppl < best_dev_ppl:
+            best_dev_ppl = dev_ppl
+            best_epoch = epoch + 1
+            best_state = {k: v.clone() for k, v in brain._synapse.get_lora_weights().items()}
         if (epoch + 1) % 5 == 0 or epoch == 0 or epoch == N_EPOCHS - 1:
-            print(f"    Epoch {epoch+1:>2}/{N_EPOCHS}: loss={avg:.4f}  ppl={ppl:.2f}")
+            print(f"    Epoch {epoch+1:>2}/{N_EPOCHS}: loss={avg:.4f}  train ppl={ppl:.2f}  dev ppl={dev_ppl:.2f}")
 
         # Per-epoch spectral trajectory (Phase 1.5 diagnostic)
         lora_w_epoch = brain._synapse.get_lora_weights()
@@ -300,11 +378,15 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
 
     t_train = time.perf_counter() - t_train_start
 
-    # Final eval
-    t_eval2_start = time.perf_counter()
+    # Final eval (last epoch), then early-stopped eval (best dev epoch)
     train_ppl = compute_ppl(model, tokenizer, train_texts)
-    val_ppl_after = compute_ppl(model, tokenizer, val_texts)
-    t_eval2 = time.perf_counter() - t_eval2_start
+    test_ppl_after = compute_ppl(model, tokenizer, test_texts)
+    test_ppl_early = test_ppl_after
+    if best_state is not None and best_epoch != N_EPOCHS:
+        final_state = {k: v.clone() for k, v in brain._synapse.get_lora_weights().items()}
+        brain._synapse.set_lora_weights(best_state)
+        test_ppl_early = compute_ppl(model, tokenizer, test_texts)
+        brain._synapse.set_lora_weights(final_state)
 
     # Effective rank
     from rengongtong._spectral import effective_rank_summary
@@ -331,6 +413,8 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
         active_components.append("gershgorin_decay")
     if mpt_cfg.decay_mode == DM.DIAGONAL_MASS:
         active_components.append("diagonal_mass_decay")
+    if mpt_cfg.decay_mode == DM.UNIFORM:
+        active_components.append("uniform_shrink")
     if mpt_cfg.subspace_protection_weight > 0:
         active_components.append("subspace_protection")
     if mpt_cfg.decay_mode == DM.HYBRID:
@@ -353,10 +437,17 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
         "epoch_ppls": epoch_ppls,
         "epoch_instability": [round(v, 6) for v in epoch_instability],
         "epoch_diag_dominance": [round(v, 6) for v in epoch_diag_dominance],
+        "epoch_dev_ppls": epoch_dev_ppls,
+        "epoch_shrink": [round(v, 6) for v in epoch_shrink],
         "train_ppl": round(train_ppl, 4),
-        "val_ppl_before": round(val_ppl_before, 4),
-        "val_ppl_after": round(val_ppl_after, 4),
-        "delta_ppl": round(val_ppl_after - val_ppl_before, 4),
+        "dev_ppl_before": round(dev_ppl_before, 4),
+        "best_dev_ppl": round(best_dev_ppl, 4),
+        "best_epoch": best_epoch,
+        "test_ppl_before": round(test_ppl_before, 4),
+        "test_ppl_after": round(test_ppl_after, 4),
+        "test_ppl_early_stopped": round(test_ppl_early, 4),
+        "delta_ppl": round(test_ppl_after - test_ppl_before, 4),
+        "delta_ppl_early_stopped": round(test_ppl_early - test_ppl_before, 4),
         "avg_effective_rank": round(avg_rank, 2),
         "dct_energy_r10": round(energy_mean_r10, 4),
         "dct_energy_r50": round(energy_mean_r50, 4),
@@ -369,7 +460,10 @@ def train_condition(cond: Condition, train_texts: list[str], val_texts: list[str
     result.update(_pinned_metadata())
 
     print(f"  Train: {t_train:.1f}s ({total_steps} steps)")
-    print(f"  Train PPL: {train_ppl:.2f}  |  Val: {val_ppl_before:.2f} → {val_ppl_after:.2f}  (Δ={result['delta_ppl']:+.2f})")
+    print(
+        f"  Train PPL: {train_ppl:.2f}  |  Test: {test_ppl_before:.2f} → {test_ppl_after:.2f}  "
+        f"(Δ={result['delta_ppl']:+.2f}; early-stopped @ epoch {best_epoch}: Δ={result['delta_ppl_early_stopped']:+.2f})"
+    )
     print(f"  Avg eff rank: {avg_rank:.1f}  |  DCT energy@10%: {energy_mean_r10:.4f}")
 
     del brain
@@ -453,17 +547,36 @@ def save_result(result: dict):
 # Main
 # ---------------------------------------------------------------------------
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--experiment", default="experiment_002", help="results sub-directory")
+    parser.add_argument("--seeds", type=int, nargs="+", default=SEEDS)
+    parser.add_argument("--models", nargs="+", default=None, help="e.g. 135M 1.7B")
+    parser.add_argument("--regularizers", nargs="+", default=None, help="regularizer tags to run")
+    return parser.parse_args()
+
+
 def main():
+    global ROOT
+    args = parse_args()
+    ROOT = _SCRIPT_DIR / "results" / args.experiment
+    ROOT.mkdir(parents=True, exist_ok=True)
+
     print("=" * 72)
     print("  EXPERIMENT: MPT spectral regularization for small LMs")
     print(f"  Root: {ROOT.resolve()}")
+    print(f"  Matched shrink: weight_decay={MATCHED_WEIGHT_DECAY:.3f}  uniform λ₀={MATCHED_UNIFORM_LAMBDA0:.4f}")
     print("=" * 72)
 
     save_commit_info()
-    train_texts, val_texts = load_wikitext()
-    print(f"  Train: {len(train_texts)}  |  Val: {len(val_texts)}")
+    train_texts, dev_texts, test_texts = load_wikitext()
+    print(f"  Train: {len(train_texts)}  |  Dev: {len(dev_texts)}  |  Test: {len(test_texts)}")
 
-    conditions = build_conditions()
+    conditions = build_conditions(
+        args.seeds,
+        set(args.models) if args.models else None,
+        set(args.regularizers) if args.regularizers else None,
+    )
     save_conditions(conditions)
     print(f"  Total conditions: {len(conditions)}")
 
@@ -478,7 +591,7 @@ def main():
 
         print(f"\n>>> [{i+1}/{len(conditions)}] {cond.tag}")
         try:
-            result = train_condition(cond, train_texts, val_texts)
+            result = train_condition(cond, train_texts, dev_texts, test_texts)
             results.append(result)
             save_result(result)
         except Exception as e:
@@ -504,11 +617,15 @@ def main():
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "config": {
             "n_train": N_TRAIN,
-            "n_val": N_VAL,
+            "n_dev": N_DEV,
+            "n_test": N_TEST,
+            "matched_shrink_per_epoch": MATCHED_SHRINK_PER_EPOCH,
+            "matched_weight_decay": MATCHED_WEIGHT_DECAY,
+            "matched_uniform_lambda0": MATCHED_UNIFORM_LAMBDA0,
             "n_epochs": N_EPOCHS,
             "batch_size": BATCH_SIZE,
             "lr": FEED_LR,
-            "seeds": SEEDS,
+            "seeds": args.seeds,
         },
         "models": [m.name for m in MODELS],
         "regularizers": list({c.reg.tag for c in conditions}),
@@ -536,7 +653,7 @@ def print_summary(results: list[dict]):
     print("\n" + "=" * 72)
     print("  SUMMARY (mean ± std across seeds)")
     print("=" * 72)
-    header = f"{'Model':<14} {'Reg':<16} {'Train PPL':>10} {'Val PPL':>10} {'ΔPPL':>8} {'EffRank':>8} {'E@10%':>8}"
+    header = f"{'Model':<14} {'Reg':<22} {'Train PPL':>10} {'Test PPL':>10} {'ΔPPL':>8} {'ΔPPL(ES)':>9} {'EffRank':>8} {'E@10%':>8}"
     print(header)
     print("-" * len(header))
     for key in sorted(grouped.keys()):
@@ -546,17 +663,19 @@ def print_summary(results: list[dict]):
             print(f"{'ERROR':>14} {key}")
             continue
         train_ppls = [g["train_ppl"] for g in valid]
-        val_ppls = [g["val_ppl_after"] for g in valid]
+        test_ppls = [g["test_ppl_after"] for g in valid]
         deltas = [g["delta_ppl"] for g in valid]
+        deltas_es = [g["delta_ppl_early_stopped"] for g in valid]
         ranks = [g.get("avg_effective_rank", 0) for g in valid]
         energies = [g.get("dct_energy_r10", 0) for g in valid]
         parts = key.split("/")
         print(
             f"{parts[0]:<14} "
-            f"{parts[1]:<16} "
+            f"{parts[1]:<22} "
             f"{sum(train_ppls)/len(train_ppls):>8.2f}±{_std(train_ppls):.2f} "
-            f"{sum(val_ppls)/len(val_ppls):>8.2f}±{_std(val_ppls):.2f} "
+            f"{sum(test_ppls)/len(test_ppls):>8.2f}±{_std(test_ppls):.2f} "
             f"{sum(deltas)/len(deltas):>+7.2f}±{_std(deltas):.2f} "
+            f"{sum(deltas_es)/len(deltas_es):>+7.2f}±{_std(deltas_es):.2f} "
             f"{sum(ranks)/len(ranks):>7.1f}±{_std(ranks):.1f} "
             f"{sum(energies)/len(energies):>7.4f}±{_std(energies):.4f}"
         )

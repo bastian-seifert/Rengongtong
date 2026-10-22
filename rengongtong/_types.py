@@ -25,6 +25,7 @@ class DecayMode:
     HYBRID = "hybrid"
     DIAGONAL_MASS = "diagonal_mass"
     ROTATED_GERSHGORIN = "rotated_gershgorin"
+    UNIFORM = "uniform"
 
 
 @dataclass(frozen=True)
@@ -35,9 +36,11 @@ class MptConfig:
     """
 
     decay_mode: str = DecayMode.GERSHGORIN
+    decay_base_lambda: float = 0.01
     gershgorin_penalty: float = 0.1
     pseudospectral_epsilon: float = 1e-5
-    pseudospectral_threshold: float = 10.0
+    # Normalized logit sensitivity; README: < 0.02 stable, > 0.05 unstable.
+    pseudospectral_threshold: float = 0.05
     subspace_protection_weight: float = 0.0
     subspace_rank: int = 8
     spectral_sparsity_retention: float = 1.0

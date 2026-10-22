@@ -5,7 +5,13 @@ import math
 
 import torch
 
-from rengongtong._spectral import apply_diagonal_mass_decay, apply_lora_gershgorin_decay, apply_rotated_gershgorin_decay, compute_saliency
+from rengongtong._spectral import (
+    apply_diagonal_mass_decay,
+    apply_lora_gershgorin_decay,
+    apply_rotated_gershgorin_decay,
+    apply_uniform_decay,
+    compute_saliency,
+)
 from rengongtong._types import DecayMode, TensorDict
 
 log = logging.getLogger(__name__)
@@ -14,7 +20,7 @@ log = logging.getLogger(__name__)
 class MetabolicLoop:
     """Biological weight decay with configurable spectral protection.
 
-    Six decay modes are available via `DecayMode`:
+    Seven decay modes are available via `DecayMode`:
 
     * ``NONE`` — hard no-op; returns weights untouched.
     * ``SALIENCY`` — magnitude-based protection (original behaviour).
@@ -26,6 +32,9 @@ class MetabolicLoop:
       instability weighting).  Control for mechanism discrimination.
     * ``ROTATED_GERSHGORIN`` — Gershgorin decay applied in a random
       orthogonal basis.  Tests basis-dependence of the mechanism.
+    * ``UNIFORM`` — plain multiplicative shrinkage ``w ← (1 − λ(t)) w``.
+      Null-hypothesis control: structured modes must beat this at
+      matched shrinkage to claim their structure matters.
     """
 
     def __init__(
@@ -58,6 +67,10 @@ class MetabolicLoop:
 
         if self.mode == DecayMode.HYBRID:
             return self._hybrid_tick(weights, lambda_t)
+
+        if self.mode == DecayMode.UNIFORM:
+            log.debug("Uniform shrinkage: λ(t)=%.6f", lambda_t)
+            return apply_uniform_decay(weights, lambda_t)
 
         if self.mode == DecayMode.DIAGONAL_MASS:
             result = apply_diagonal_mass_decay(weights, lambda_t, self.gershgorin_penalty)

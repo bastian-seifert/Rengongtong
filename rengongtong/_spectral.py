@@ -165,6 +165,33 @@ def apply_lora_gershgorin_decay(
 # ---------------------------------------------------------------------------
 
 
+def apply_uniform_decay(weights: TensorDict, lambda_base: float) -> TensorDict:
+    """Plain multiplicative shrinkage ``w ← (1 − λ) w`` on every tensor.
+
+    The null-hypothesis control for all spectral decay modes: if a
+    structured decay does not beat uniform shrinkage of the *same total
+    magnitude*, the structure carries no information.  Note that scaling
+    both A and B by (1 − λ) shrinks the merged update BA by (1 − λ)².
+    """
+    factor = 1.0 - min(max(lambda_base, 0.0), 1.0 - 1e-8)
+    return {key: tensor * factor for key, tensor in weights.items()}
+
+
+def merged_update_norm(weights: TensorDict) -> float:
+    """Total Frobenius norm of all merged LoRA updates ‖BA‖_F (summed in quadrature).
+
+    Logged before/after each decay tick so different decay modes can be
+    compared at matched shrinkage.
+    """
+    total = 0.0
+    for _, A, _, B in _match_lora_pairs(weights):
+        try:
+            total += float((B.float() @ A.float()).pow(2).sum().item())
+        except RuntimeError:
+            continue
+    return math.sqrt(total)
+
+
 def apply_diagonal_mass_decay(
     weights: TensorDict,
     lambda_base: float,
@@ -280,22 +307,27 @@ def apply_rotated_gershgorin_decay(
 
 @torch.inference_mode()
 def _inject_lora_noise(model: torch.nn.Module, epsilon: float) -> dict[str, torch.Tensor]:
-    """Add ε * N(0,1) in-place to every LoRA parameter. Returns noise dict for removal."""
-    noise_dict: dict[str, torch.Tensor] = {}
+    """Add ε * N(0,1) in-place to every LoRA parameter.
+
+    Returns a copy of the *original* parameters.  Restoring from a copy
+    (rather than subtracting the noise again) is exact even in bf16/fp16,
+    where ``(w + n) - n != w`` after rounding.
+    """
+    originals: dict[str, torch.Tensor] = {}
     for name, param in model.named_parameters():
         if "lora_" in name:
-            noise = torch.randn_like(param) * epsilon
-            param.add_(noise)
-            noise_dict[name] = noise
-    return noise_dict
+            originals[name] = param.detach().clone()
+            noise = torch.randn(param.shape, device=param.device, dtype=torch.float32) * epsilon
+            param.copy_((param.float() + noise).to(param.dtype))
+    return originals
 
 
 @torch.inference_mode()
-def _remove_lora_noise(model: torch.nn.Module, noise_dict: dict[str, torch.Tensor]) -> None:
-    """Remove previously injected noise from every LoRA parameter."""
+def _remove_lora_noise(model: torch.nn.Module, originals: dict[str, torch.Tensor]) -> None:
+    """Restore every LoRA parameter from the copies made by `_inject_lora_noise`."""
     for name, param in model.named_parameters():
-        if name in noise_dict:
-            param.sub_(noise_dict[name])
+        if name in originals:
+            param.copy_(originals[name])
 
 
 @torch.inference_mode()
@@ -307,29 +339,32 @@ def pseudospectral_sensitivity(
     labels: torch.Tensor | None = None,
     normalize: bool = True,
 ) -> torch.Tensor:
-    """Resolvent-style norm via finite perturbation — self-cleaning.
+    """Output sensitivity to random LoRA weight noise — self-cleaning.
 
-    The resolvent ‖(zI - W)^{-1}‖ is approximated by:
+    Note: despite the historical name this is *not* a resolvent norm
+    ‖(zI - W)^{-1}‖.  It is a random-perturbation sharpness measure
+    (cf. Keskar et al. 2017; Jiang et al. 2019, "Fantastic Generalization
+    Measures"):
       1. Forward pass through the model → logits_1
       2. Inject ε-scale noise into every LoRA parameter
       3. Forward pass again → logits_2
-      4. Remove noise
+      4. Restore the original parameters exactly
       5. Return ‖logits_1 - logits_2‖_F (normalized by ‖logits_1‖_F
          when *normalize* is True, making the metric scale-invariant).
 
-    A large return value signals a *pseudospectral danger zone* where tiny
-    weight perturbations cause disproportionately large output changes.
+    A large return value means tiny weight perturbations cause
+    disproportionately large output swings (a sharp region).
     """
     out1 = forward_fn(input_ids, attention_mask=attention_mask, labels=labels)
     logits_1 = out1.logits if hasattr(out1, "logits") else out1
     norm_1 = logits_1.float().norm()
 
-    noise_dict = _inject_lora_noise(forward_fn, epsilon)
-
-    out2 = forward_fn(input_ids, attention_mask=attention_mask, labels=labels)
-    logits_2 = out2.logits if hasattr(out2, "logits") else out2
-
-    _remove_lora_noise(forward_fn, noise_dict)
+    originals = _inject_lora_noise(forward_fn, epsilon)
+    try:
+        out2 = forward_fn(input_ids, attention_mask=attention_mask, labels=labels)
+        logits_2 = out2.logits if hasattr(out2, "logits") else out2
+    finally:
+        _remove_lora_noise(forward_fn, originals)
 
     gap = (logits_1.float() - logits_2.float()).norm()
     return gap / norm_1 if normalize else gap
@@ -402,6 +437,94 @@ def subspace_rotation_loss(
         count += 1
 
     return total / max(count, 1)
+
+
+def principal_right_subspaces(
+    weights: TensorDict,
+    rank: int = 8,
+    min_norm: float = 1e-8,
+) -> TensorDict:
+    """Top-*rank* right singular vectors V (n × k) of every 2-D tensor.
+
+    Tensors with (near-)zero norm are skipped: their SVD is undefined.
+    This matters for LoRA, where B is zero-initialised.  Computed once
+    per reference snapshot so the training loop never runs an SVD.
+    """
+    bases: TensorDict = {}
+    for key, w in weights.items():
+        if w.ndim != 2:
+            continue
+        w = w.detach().float()
+        if w.norm() < min_norm:
+            continue
+        k = min(rank, *w.shape)
+        if k < 1:
+            continue
+        _, _, Vh = torch.linalg.svd(w, full_matrices=False)
+        bases[key] = Vh[:k].T.contiguous()
+    return bases
+
+
+def subspace_leakage_loss(
+    bases: TensorDict,
+    current: TensorDict,
+) -> torch.Tensor:
+    """Differentiable subspace-drift penalty (training counterpart of `subspace_rotation_loss`).
+
+    For each layer with a reference basis V (from `principal_right_subspaces`)::
+
+        leak(W) = ‖W (I − V Vᵀ)‖²_F / ‖W‖²_F
+
+    i.e. the fraction of the row-space energy of the *current* weight W
+    that lies outside the reference subspace.  It is 0 when W stays inside
+    span(V) and approaches 1 when W rotates fully away from it.
+
+    Unlike `subspace_rotation_loss` this needs no SVD of W, so gradients
+    are cheap and well-defined (SVD backward is unstable for nearly
+    repeated singular values).  *current* must hold the live parameters,
+    not detached copies, or the penalty has no gradient.
+    """
+    total: torch.Tensor | None = None
+    count = 0
+    for key, V in bases.items():
+        W = current.get(key)
+        if W is None:
+            continue
+        Wf = W.float()
+        Vd = V.to(device=Wf.device, dtype=Wf.dtype)
+        outside = Wf - (Wf @ Vd) @ Vd.T
+        leak = outside.pow(2).sum() / (Wf.pow(2).sum() + 1e-12)
+        total = leak if total is None else total + leak
+        count += 1
+    if total is None:
+        device = next(iter(current.values())).device if current else None
+        return torch.zeros((), device=device)
+    return total / count
+
+
+def intruder_dimensions(
+    W_base: torch.Tensor,
+    W_tuned: torch.Tensor,
+    top_k: int = 10,
+    threshold: float = 0.5,
+) -> int:
+    """Count *intruder dimensions* (Shuttleworth et al. 2024, "LoRA vs Full
+    Fine-tuning: An Illusion of Equivalence").
+
+    Among the top-*top_k* left singular vectors of the fine-tuned weight
+    ``W_tuned = W_base + ΔW``, count those whose maximum absolute cosine
+    similarity to *any* left singular vector of ``W_base`` is below
+    *threshold*.  Intruder dimensions correlate with forgetting of the
+    pretraining distribution; this is the measurable version of
+    "protecting the fundamental logic of the base model".
+    """
+    if W_base.shape != W_tuned.shape or W_base.ndim != 2:
+        raise ValueError("W_base and W_tuned must be 2-D tensors of equal shape")
+    U_base, _, _ = torch.linalg.svd(W_base.float(), full_matrices=False)
+    U_tuned, _, _ = torch.linalg.svd(W_tuned.float(), full_matrices=False)
+    k = min(top_k, U_tuned.shape[1])
+    sims = (U_tuned[:, :k].T @ U_base).abs()  # k × rank(W_base)
+    return int((sims.max(dim=1).values < threshold).sum().item())
 
 
 # ---------------------------------------------------------------------------

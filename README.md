@@ -69,13 +69,15 @@ rengongtong/
 
 ## Matrix Perturbation Theory (MPT)
 
-Three MPT concepts mathematically guard the entity's "soul" against catastrophic
-forgetting and eigenvalue drift:
+Three MPT-inspired constructs regularize the entity's "soul".  Read the white
+paper's erratum (`white_paper/results/experiment_001/paper.md`) before relying on
+the original claims: in practice the Gershgorin decay acts as norm-dependent
+shrinkage of the merged LoRA update, and its benefit over *shrink-matched*
+baselines is still being re-measured (`experiment_002`).
 
 ### 1. Gershgorin Circle Decay (`metabolism.py`)
 
-Prevents eigenvalues from wandering into the complex plane, which causes erratic
-"mood swings." The Gershgorin radius `R_i = Σ_{j≠i} |w_ij|` is computed on
+Penalizes off-diagonal mass of the merged update. The Gershgorin radius `R_i = Σ_{j≠i} |w_ij|` is computed on
 the **merged `B@A` weight update** (square attention projections). Rows where
 `R_i > |w_ii|` get an extra decay penalty on their off-diagonal elements.
 
@@ -83,24 +85,31 @@ the **merged `B@A` weight update** (square attention projections). Rows where
 - `saliency` — magnitude-based protection (original behavior)
 - `gershgorin` — penalizes off-diagonal elements in unstable rows of merged `B@A`
 - `hybrid` — both saliency protection and Gershgorin off-diagonal penalties
+- `diagonal_mass` / `rotated_gershgorin` — mechanism controls
+- `uniform` — plain shrinkage `w ← (1 − λ(t)) w`, the null-hypothesis baseline
+- `none` — no decay
 
-### 2. Pseudospectral Stability (`curiosity.py`, `_spectral.py`)
+### 2. Perturbation Sensitivity (`curiosity.py`, `_spectral.py`)
 
-Measures the resolvent norm `‖(zI − W)^{-1}‖` via finite perturbation:
-inject ε-scale noise into all LoRA weights, measure `‖logits − logits_perturbed‖ / ‖logits‖`.
-A large gap signals a "danger zone" where small weight changes cause large
-output swings — a precursor to hallucination.
+Historically called "pseudospectral stability", but it is a random-perturbation
+*sharpness* measure, not a resolvent norm: inject ε-scale noise into all LoRA
+weights, measure `‖logits − logits_perturbed‖ / ‖logits‖`, then restore the
+weights exactly. A large value means small weight changes cause large output
+swings.
 
-### 3. Davis-Kahan Subspace Protection (`dreaming.py`, `_spectral.py`)
+### 3. Subspace Protection (`dreaming.py`, `_spectral.py`)
 
-During the dream cycle, penalizes the sine of the angle between the principal
-singular vectors of the base and current LoRA weights. This ensures the entity
-learns new data without rotating its "fundamental logic" away from the pretrained
-foundation.
+During the dream cycle, penalizes the fraction of each LoRA weight's energy that
+leaves the principal right-singular subspace captured at the start of the cycle
+(a differentiable surrogate of the Davis–Kahan sin Θ angle):
 
 ```
-Loss_total = Loss_NLL + λ · ‖sin Θ(V_base, V_soul)‖_F
+Loss_total = Loss_NLL + λ · mean_layers ‖W (I − V_ref V_refᵀ)‖²_F / ‖W‖²_F
 ```
+
+The reference is the LoRA adapter itself, not the pretrained weights W₀. To
+measure drift away from the pretrained foundation, use
+`_spectral.intruder_dimensions(W0, W0 + ΔW)` (Shuttleworth et al. 2024).
 
 ---
 
@@ -175,17 +184,17 @@ rengongtong run -R 200 --replay-mode nll
 ### Understanding MPT Metrics
 
 The `status` command shows `stability_gap` in the entity state. This is the
-normalized pseudospectral sensitivity:
+normalized perturbation sensitivity (see `CuriosityController.measure_stability`).
+Nothing calls it automatically yet, so the value stays 0 until you do:
 
 | Value | Meaning |
 |---|---|
 | `< 0.02` | Very stable — safe learning zone |
 | `0.02–0.05` | Moderate — some perturbation sensitivity |
-| `> 0.05` | Unstable — high risk of hallucination/erratic behavior |
+| `> 0.05` | Unstable — high output sensitivity to weight noise |
 
-A rising stability gap during feeding indicates the new data is perturbing the
-model's matrix structure. The Gershgorin and Davis-Kahan constraints
-counteract this drift.
+These thresholds are heuristics; whether sensitivity predicts hallucination in
+this setup has not been measured.
 
 ### Interactive Mode (`run`)
 
@@ -218,8 +227,8 @@ mpt = MptConfig(
     decay_mode=DecayMode.HYBRID,              # Gershgorin + saliency
     gershgorin_penalty=0.05,                  # gentle constraint on merged B@A
     pseudospectral_epsilon=1e-5,              # noise scale for stability check
-    pseudospectral_threshold=10.0,            # gap above which mood becomes "bored"
-    subspace_protection_weight=0.05,          # Davis-Kahan loss weight during dreaming
+    pseudospectral_threshold=0.05,            # sensitivity above which mood becomes "bored"
+    subspace_protection_weight=0.05,          # subspace-leakage loss weight during dreaming
     subspace_rank=8,                          # number of singular vectors to align
 )
 
@@ -274,7 +283,7 @@ rengongtong chat "Wos host du glernt?" --soul souls/a1b2c3.../
 
 ```bash
 uv sync --dev           # includes pytest, ruff, mypy
-uv run pytest           # 144 tests
+uv run pytest
 uv run ruff check .     # linting
 uv run mypy rengongtong  # type checking
 ```
